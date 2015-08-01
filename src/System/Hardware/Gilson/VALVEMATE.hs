@@ -70,9 +70,10 @@ mkVALVEMATE num
     where
         vlvToHome ::
             (Enum i, Typeable i, MonadUnderA m) => Action (VALVEMATE i) GSIOC eff m ()
-        vlvToHome = doPatternFail (return ()) $ do
-            Undefined _ <- requestCurrentPosition
-            buffered "H"
+        vlvToHome = do
+            requestCurrentPosition >>= \s -> case s of
+                Undefined _ -> buffered "H"
+                _           -> return ()
 
         writeCurrentPosition pos = do
             lift ask >>= registerWait

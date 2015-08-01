@@ -294,22 +294,23 @@ deviceAsk reg = withRegister reg (registerAsk_ reg)
 
 registerAsk :: MonadUnderA m => Register dev proto s e i a -> Action dev proto eff m (TransactionValue e i a)
 registerAsk reg =
-    (transactionState reg >>= \(Complete v) -> return (Complete v)) `failPattern`
-        (deviceAsk reg >>= \val ->
+    transactionState reg >>= \s -> case s of
+        Complete v -> return (Complete v)
+        _          -> deviceAsk reg >>= \val ->
             liftIO $ atomicModifyIORef' (registerTarget reg) $
                 \target -> case val of
                     Complete _  -> (Complete (stateValue target), val)
                     Undefined _ -> (Undefined (stateValue target), val)
-                    _           -> (target, val))
+                    _           -> (target, val)
 
 registerWait :: MonadUnderA m => Register dev proto s e i a -> Action dev proto eff m ()
 registerWait reg = do
     state <- bracketOnError
         (liftIO $ takeMVar (registerWaitLock reg))
         unlockWith
-        (either throwM $ \_ -> return (Right ()) `doPatternFail` do
-            Current _ <- transactionState reg
-            try (withRegister reg (registerWait_ reg)))
+        (\e -> transactionState reg >>= \s -> case s of
+            Current _ -> try (withRegister reg (registerWait_ reg))
+            _         -> either throwM (const $ return $ Right ()) e)
     unlockWith state
     either throwM (const (return ())) state
     where
@@ -321,7 +322,9 @@ registerWrite' reg val = registerWrite reg val >> registerWait reg
 registerRead :: MonadUnderA m => Register dev proto s e i a -> Action dev proto eff m a
 registerRead reg = do
     registerWait reg
-    error "Bad registor reading" `patternFail` (registerAsk reg >>= \(Complete v) -> return v)
+    registerAsk reg >>= \s -> case s of
+        Complete v -> return v
+        _          -> error "Bad register reading"
 
 data CreateRegisterOptions dev proto s e i a = CreateRegisterOptions
         { regWait :: forall m. MonadRegister dev proto s e i a m => forall eff. Action dev proto eff m ()
@@ -330,7 +333,9 @@ data CreateRegisterOptions dev proto s e i a = CreateRegisterOptions
 defaultRegister :: CreateRegisterOptions dev proto s e i a
 defaultRegister =
     CreateRegisterOptions
-        { regWait = return () `patternFail` (lift ask >>= registerAsk >>= \(Current _) -> regWait defaultRegister)
+        { regWait = lift ask >>= registerAsk >>= \s -> case s of
+            Current _ -> regWait defaultRegister
+            _         -> return ()
         , regAsk  = lift ask >>= registerValue >>= return . Complete }
 
 newRegister :: MonadUnderA m =>
