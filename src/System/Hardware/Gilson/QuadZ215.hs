@@ -105,14 +105,28 @@ data Position a
     | Somewhere
     deriving (Eq, Ord, Show, Typeable)
 
+data ProbePosition a
+    = ProbeIn a
+    | ProbeInLiquid a
+    | ProbeMoveThrough a
+    | ProbeHoming
+    | ProbeSomewhere
+    deriving (Eq, Ord, Show, Typeable)
+
 type Range a = (a, a)
 
-instance Eq a => Result Position a where
-    resultState st = case st of
-        In v -> Just v
-        _    -> Nothing
+instance Eq a => StateMap ProbePosition a where
+    stateMap st = case st of
+        ProbeIn v       -> Final v
+        ProbeInLiquid v -> OtherComplete v
+        ProbeSomewhere  -> Fail
+        _               -> LocalDrivenIntermediate
 
-    failState st = st == Somewhere
+instance Eq a => StateMap Position a where
+    stateMap st = case st of
+        In v      -> Final v
+        Somewhere -> Fail
+        _         -> LocalDrivenIntermediate
 
 transPitchStatus :: MonadUnderA m => Transition QuadZ eff s Position Deci m (Position Deci)
 transPitchStatus = do
@@ -204,7 +218,7 @@ motorStatus = immediateParsec 'm' $ MotorDigest
             <|> (char 'I' $> MotorNotInit)
 
 defaultGSIOCTracker ::
-    (Result f a, MonadUnderA m) =>
+    (StateMap f a, MonadUnderA m) =>
     STM Bool ->
     (f a -> Transition dev Pure s f a m ()) -> Transition dev Pure s f a m ()
 defaultGSIOCTracker tracked _ = ask >>= \prop -> forever $ do
@@ -214,7 +228,7 @@ defaultGSIOCTracker tracked _ = ask >>= \prop -> forever $ do
     void requestStatus
 
 gsiocVariable
-    :: (MonadUnderA m, MonadAccum (CreateCtx d (Action dev Create IO)) m, Result f a)
+    :: (MonadUnderA m, MonadAccum (CreateCtx d (Action dev Create IO)) m, StateMap f a)
     => PropertyMeta a -- ^ Name, validator and equal for property. 
     -> (forall m1 eff. (IfImpure eff, MonadUnderA m1) => Transition dev eff () f a m1 (f a)) -- ^ Property unblockable state acess
     -> (forall m1. MonadUnderA m1 => a -> forall eff. Transition dev (Impure eff) () f a m1 ()) -- ^ Start transition to new value
@@ -232,12 +246,9 @@ gsiocVariable meta getter mutator = do
     addToStage $ void $ withProperty prop $ requestStatus
     return prop
 
-mkQZ :: CreateAction QuadZ (QuadZ ())
-mkQZ = do
-    xs <- atomic $ replicateM 3 $ immediate 'Q'
-    let errMsg              = "Can't parse " ++ concat xs
-        box@(xRng, yRng, _) = fromMaybe (error errMsg) (readRanges xs)
-        positionValidate v  = case v of
+mkQZ :: (Range Deci, Range Deci, Range Deci) -> CreateAction QuadZ (QuadZ ())
+mkQZ box@(xRng, yRng, _) = do
+    let positionValidate v  = case v of
             (x, y)
                 | x < fst xRng || x > snd xRng -> Left "X out of range"
                 | y < fst yRng || y > snd yRng -> Left "Y out of range"
@@ -257,6 +268,15 @@ mkQZ = do
         pMeta { propertyName = "Probe distance", propertyValid = rangeValidate 9 18  }
         transPitchStatus
         (\(MkFixed val) -> buffered ('w' : show val))
+
+    probeAHnd <- mkSubDevice $ do
+        zPos <- gsiocVariable pMeta { propertyName = "Z position A probe" }
+            (do
+                immediate 'Z'
+                undefined)
+            (\(MkFixed val) -> buffered ("Za" ++ show val))
+        return Probe { zAxisPosition = zPos }
+
     return QuadZ
         { xyAxisPosition = posProp
         , probeWidth     = widthProp
@@ -264,7 +284,7 @@ mkQZ = do
             buffered "H"
             withProperty posProp $ cacheInvalidate
             withProperty widthProp $ cacheInvalidate
-        , probeA         = undefined
+        , probeA         = probeAHnd
         , probeB         = undefined
         , probeC         = undefined
         , probeD         = undefined

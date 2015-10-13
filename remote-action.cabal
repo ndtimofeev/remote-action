@@ -28,17 +28,13 @@ library
     Control.Monad.Action.Internal
   exposed-modules:
     Control.Concurrent.Utils,
-    Control.Concurrent.SigVar,
     Control.Monad.Action,
     Control.Monad.Accum,
     Data.Property,
 --    Control.Monad.Resumable,
---    Control.Monad.RemoteMonad,
     Control.Monad.StaticScope,
---    Control.Monad.Statemachine,
     System.Hardware.GSIOC,
     System.Hardware.GSIOC.Raw,
---    System.Hardware.Gilson.Devices,
 --    System.Hardware.Gilson.OrbitalShaker,
 --    System.Hardware.Gilson.Pump306,
 --    System.Hardware.Gilson.VALVEMATE,
