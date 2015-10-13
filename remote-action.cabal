@@ -1,15 +1,13 @@
-name:                gsioc
+name:                remote-action
 version:             0.0.3.0
-synopsis:            Gilson GSIOC protocol implementation
+synopsis:            Monad for thread-safe remote device interaction
 -- description:         
 license:             MIT
--- license-file:        LICENSE
 author:              KblCb
 maintainer:          ndtimofeev@gmail.com
 -- copyright:           
 category:            System, Hardware, Science
 build-type:          Simple
--- extra-source-files:  
 cabal-version:       >=1.10
 
 flag thermometer
@@ -40,13 +38,13 @@ library
 --    Control.Monad.Statemachine,
     System.Hardware.GSIOC,
     System.Hardware.GSIOC.Raw,
-    System.Hardware.Gilson.Devices
+--    System.Hardware.Gilson.Devices,
 --    System.Hardware.Gilson.OrbitalShaker,
 --    System.Hardware.Gilson.Pump306,
 --    System.Hardware.Gilson.VALVEMATE,
 --    System.Hardware.Gilson.SyringePump402,
 --    System.Hardware.Gilson.SystemInterface506C,
---    System.Hardware.Gilson.QuadZ215,
+    System.Hardware.Gilson.QuadZ215
 --    System.Hardware.Vici.MicroValveActuator
 
   default-extensions:
@@ -69,17 +67,17 @@ library
   build-depends:
     async,
     base,
-    time,
-    binary,
+--    time,
+--    binary,
     bytestring,
     exceptions,
     mtl,
     serialport,
     parsec,
-    process,
+--    process,
     stm,
-    transformers,
-    vector
+    transformers
+--    vector
 
   hs-source-dirs:      src
   default-language:    Haskell2010
