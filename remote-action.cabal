@@ -85,11 +85,3 @@ library
   if flag( debug )
     build-depends: QuickCheck, random
     exposed-modules: Data.Property.Test
-
-  if flag( thermometer )
-    build-depends: usb
-    exposed-modules: System.Hardware.Thermometer
-
-  if flag( socat )
-    build-depends: process, directory, filepath
-    exposed-modules: System.Hardware.Serialport.Socat
