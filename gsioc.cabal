@@ -1,5 +1,5 @@
 name:                gsioc
-version:             0.0.1.0
+version:             0.0.3.0
 synopsis:            Gilson GSIOC protocol implementation
 -- description:         
 license:             MIT
@@ -16,38 +16,55 @@ flag thermometer
   description: Enable usb thermometer support
   default:     False
 
+flag socat
+  description: Enable remoat serialport connection over socat
+  default:     False
+
+flag debug
+  description: Enable extra dependency for debuging
+  default:     False
+
 library
-  ghc-options:         -Wall -O2
+  ghc-options: -Wall -O2 -fno-warn-orphans -fno-warn-unused-do-bind -fdefer-typed-holes -fno-warn-typed-holes
   other-modules:
-    Control.Monad.Catch.Utils
+    Control.Monad.Action.Internal
   exposed-modules:
     Control.Concurrent.Utils,
     Control.Concurrent.SigVar,
     Control.Monad.Action,
-    Control.Monad.Resumable,
-    Control.Monad.Statemachine,
+    Control.Monad.Accum,
+    Data.Property,
+--    Control.Monad.Resumable,
+--    Control.Monad.RemoteMonad,
+    Control.Monad.StaticScope,
+--    Control.Monad.Statemachine,
     System.Hardware.GSIOC,
     System.Hardware.GSIOC.Raw,
-    System.Hardware.Gilson.OrbitalShaker,
-    System.Hardware.Gilson.Pump306,
-    System.Hardware.Gilson.VALVEMATE,
-    System.Hardware.Gilson.SyringePump402,
-    System.Hardware.Gilson.SystemInterface506C,
-    System.Hardware.Gilson.QuadZ215,
-    System.Hardware.Vici.MicroValveActuator
+    System.Hardware.Gilson.Devices
+--    System.Hardware.Gilson.OrbitalShaker,
+--    System.Hardware.Gilson.Pump306,
+--    System.Hardware.Gilson.VALVEMATE,
+--    System.Hardware.Gilson.SyringePump402,
+--    System.Hardware.Gilson.SystemInterface506C,
+--    System.Hardware.Gilson.QuadZ215,
+--    System.Hardware.Vici.MicroValveActuator
 
   default-extensions:
+    TypeFamilies,
     ExistentialQuantification,
     GeneralizedNewtypeDeriving,
     DeriveDataTypeable,
+    DeriveFoldable,
+    DeriveTraversable,
     MultiParamTypeClasses,
     FunctionalDependencies,
     FlexibleContexts,
     FlexibleInstances,
     UndecidableInstances,
+    ScopedTypeVariables,
     StandaloneDeriving,
     ConstraintKinds,
-    Rank2Types
+    RankNTypes
 
   build-depends:
     async,
@@ -58,6 +75,8 @@ library
     exceptions,
     mtl,
     serialport,
+    parsec,
+    process,
     stm,
     transformers,
     vector
@@ -65,7 +84,14 @@ library
   hs-source-dirs:      src
   default-language:    Haskell2010
 
+  if flag( debug )
+    build-depends: QuickCheck, random
+    exposed-modules: Data.Property.Test
+
   if flag( thermometer )
     build-depends: usb
     exposed-modules: System.Hardware.Thermometer
 
+  if flag( socat )
+    build-depends: process, directory, filepath
+    exposed-modules: System.Hardware.Serialport.Socat
