@@ -28,7 +28,7 @@ instance Exception Timeout
 
 newtype TimeMult = TimeMult { usPerQuant :: Integer }
 
-us, ms, s, m, h, d, y :: TimeMult
+us, ms, s, m, h, d, w, y :: TimeMult
 
 -- | microsecond
 us = TimeMult 1
@@ -56,22 +56,22 @@ y  = TimeMult (365 * usPerQuant d)
 
 instance Num a => Fractional (TimeMult -> a) where
     fromRational r (TimeMult k) = fromInteger (numerator r * k `div` denominator r)
-    recip = undefined
+    recip = _
 
 instance Num a => Num (TimeMult -> a) where
     fromInteger i (TimeMult k) = fromInteger (i * k)
-    (+)    = undefined
-    (-)    = undefined
-    (*)    = undefined
-    abs    = undefined
-    signum = undefined
+    (+)    = _
+    (-)    = _
+    (*)    = _
+    abs    = _
+    signum = _
 
 delay :: MonadIO m => USecond -> m ()
 delay t = liftIO $ do
     sequence_ $ genericReplicate n $ threadDelay maxTime
-    threadDelay (fromInteger m)
+    threadDelay (fromInteger m')
     where
-        (n, m) = t `divMod` toInteger maxTime
+        (n, m') = t `divMod` toInteger maxTime
 
         maxTime = maxBound
 

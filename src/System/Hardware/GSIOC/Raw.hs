@@ -1,18 +1,12 @@
 module System.Hardware.GSIOC.Raw where
 
 -- base
-import Prelude
-
-import Control.Applicative
-import Control.Concurrent
 import Control.Exception ( assert )
 
 import Data.Char
 import Data.Typeable
-import Data.Maybe
 import Data.Word
 
-import System.CPUTime
 import System.IO hiding ( hPutStr )
 
 -- mtl
@@ -20,9 +14,6 @@ import Control.Monad.Reader
 
 -- serialport
 import System.Hardware.Serialport
-
--- transformers
-import Control.Monad.IO.Class
 
 -- exceptions
 import Control.Monad.Catch
@@ -33,6 +24,14 @@ import qualified Data.ByteString as BS
 
 -- internal
 import Control.Concurrent.Utils
+
+class MonadGSIOC m where
+    buffered  :: String -> m ()
+    immediate :: Char -> m String
+
+instance (MonadIO m, MonadMask m) => MonadGSIOC (RawT m) where
+    buffered  = buffered'
+    immediate = immediate'
 
 -- | Current transaction state information. Only for exception using.
 data Transaction
@@ -47,7 +46,7 @@ data Transaction
 data RawEnv m = MkRawEnv
     { rawTimeout :: !Integer
     , rawState   :: Transaction
-    , rawStep    :: Monad m => Transaction -> RawT m a -> RawT m a
+    , rawStep    :: forall a. Monad m => Transaction -> RawT m a -> RawT m a
     , rawPutByte :: Word8 -> m ()
     , rawGetByte :: m Word8 }
 
@@ -124,7 +123,12 @@ evalRaw'' env act = runReaderT (runRawT act) env
 
 
 defaultRawEnw :: RawEnv m
-defaultRawEnw = MkRawEnv { rawTimeout = 20 ms, rawStep = debugStep, rawState = Unknown }
+defaultRawEnw = MkRawEnv
+    { rawTimeout = 20 ms
+    , rawStep    = debugStep
+    , rawState   = Unknown
+    , rawPutByte = undefined
+    , rawGetByte = undefined }
 
 rawEnwFromHandle :: Handle -> RawEnv IO
 rawEnwFromHandle hnd =
@@ -198,8 +202,8 @@ scan xs = case xs of
     _       -> return []
 
 
-immediate :: (MonadIO m, MonadMask m) => Char -> RawT m String
-immediate cmd
+immediate' :: (MonadIO m, MonadMask m) => Char -> RawT m String
+immediate' cmd
     | not (isAscii cmd) = error (show cmd ++ " not ascii")
     | cmd `elem` "#"    = error (show cmd ++ " is special")
     | otherwise    = do
@@ -219,8 +223,8 @@ immediate cmd
         toAscii = chr . fromIntegral
 
 -- | Send buffered command to connected device.
-buffered :: (MonadIO m, MonadMask m) => String -> RawT m ()
-buffered cmd
+buffered' :: (MonadIO m, MonadMask m) => String -> RawT m ()
+buffered' cmd
     | "" <- cmd               = error "Too short command"
     | any (not . isAscii) cmd = error ("Bad cmd " ++ cmd)
     | otherwise               = foldM_ go 1 fullCmd
