@@ -2,6 +2,7 @@ module System.Hardware.Gilson.QuadZ215 where
 
 -- base
 import Control.Applicative
+import Control.Exception
 import Control.Monad
 
 import Data.Fixed
@@ -115,18 +116,18 @@ data ProbePosition a
 
 type Range a = (a, a)
 
-instance Eq a => StateMap ProbePosition a where
+instance (Typeable a, Eq a) => StateMap ProbePosition a where
     stateMap st = case st of
         ProbeIn v       -> Final v
         ProbeInLiquid v -> OtherComplete v
         ProbeSomewhere  -> Fail
         _               -> LocalDrivenIntermediate
 
-instance Eq a => StateMap Position a where
+instance (Typeable a, Eq a) => StateMap Position a where
     stateMap st = case st of
         In v      -> Final v
         Somewhere -> Fail
-        _         -> LocalDrivenIntermediate
+        _         -> RemoteDriven
 
 transPitchStatus :: MonadUnderA m => Transition QuadZ eff s Position Deci m (Position Deci)
 transPitchStatus = do
@@ -228,7 +229,7 @@ defaultGSIOCTracker tracked _ = ask >>= \prop -> forever $ do
     void requestStatus
 
 gsiocVariable
-    :: (MonadUnderA m, MonadAccum (CreateCtx d (Action dev Create IO)) m, StateMap f a)
+    :: (Typeable dev, Typeable f, Typeable a, MonadUnderA m, MonadAccum (CreateCtx d (Action dev Create IO)) m, StateMap f a)
     => PropertyMeta a -- ^ Name, validator and equal for property. 
     -> (forall m1 eff. (IfImpure eff, MonadUnderA m1) => Transition dev eff () f a m1 (f a)) -- ^ Property unblockable state acess
     -> (forall m1. MonadUnderA m1 => a -> forall eff. Transition dev (Impure eff) () f a m1 ()) -- ^ Start transition to new value
@@ -256,9 +257,10 @@ mkQZ box@(xRng, yRng, _) = do
 
     posProp   <- gsiocVariable
         PropertyMeta
-            { propertyName  = "QuadZ hand position"
-            , propertyValid = positionValidate
-            , propertyEq    = \(x0, y0) (x1, y1) -> abs (x0 - x1) + abs (y0 - y1) <= 0.2 }
+            { propertyName         = "QuadZ hand position"
+            , propertyValid        = positionValidate
+            , propertyStartTimeout = -1
+            , propertyEq           = \(x0, y0) (x1, y1) -> abs (x0 - x1) + abs (y0 - y1) <= 0.2 }
         qzPosition
         (\(MkFixed x, MkFixed y) -> do
             MkFixed dx <- withDevice $ readProperty . probeWidth
@@ -269,13 +271,13 @@ mkQZ box@(xRng, yRng, _) = do
         transPitchStatus
         (\(MkFixed val) -> buffered ('w' : show val))
 
-    probeAHnd <- mkSubDevice $ do
-        zPos <- gsiocVariable pMeta { propertyName = "Z position A probe" }
-            (do
-                immediate 'Z'
-                undefined)
-            (\(MkFixed val) -> buffered ("Za" ++ show val))
-        return Probe { zAxisPosition = zPos }
+    -- probeAHnd <- mkSubDevice $ do
+    --     zPos <- gsiocVariable pMeta { propertyName = "Z position A probe" }
+    --         (do
+    --             immediate 'Z'
+    --             assert False undefined)
+    --         (\(MkFixed val) -> buffered ("Za" ++ show val))
+    --     return Probe { zAxisPosition = zPos }
 
     return QuadZ
         { xyAxisPosition = posProp
@@ -284,8 +286,8 @@ mkQZ box@(xRng, yRng, _) = do
             buffered "H"
             withProperty posProp $ cacheInvalidate
             withProperty widthProp $ cacheInvalidate
-        , probeA         = probeAHnd
-        , probeB         = undefined
-        , probeC         = undefined
-        , probeD         = undefined
+        , probeA         = assert False undefined
+        , probeB         = assert False undefined
+        , probeC         = assert False undefined
+        , probeD         = assert False undefined
         , quadZWorkspace = box }

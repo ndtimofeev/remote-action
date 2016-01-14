@@ -23,7 +23,7 @@ flag debug
   default:     False
 
 library
-  ghc-options: -Wall -O2 -fno-warn-orphans -fno-warn-unused-do-bind -fdefer-typed-holes -fno-warn-typed-holes
+  ghc-options: -Wall -O2 -fno-warn-orphans -fno-warn-unused-do-bind
   other-modules:
     Control.Monad.Action.Internal
   exposed-modules:

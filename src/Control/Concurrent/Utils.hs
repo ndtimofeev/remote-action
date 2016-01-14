@@ -56,15 +56,15 @@ y  = TimeMult (365 * usPerQuant d)
 
 instance Num a => Fractional (TimeMult -> a) where
     fromRational r (TimeMult k) = fromInteger (numerator r * k `div` denominator r)
-    recip = _
+    recip =undefined -- _
 
 instance Num a => Num (TimeMult -> a) where
     fromInteger i (TimeMult k) = fromInteger (i * k)
-    (+)    = _
-    (-)    = _
-    (*)    = _
-    abs    = _
-    signum = _
+    (+)    = undefined -- _
+    (-)    = undefined -- _
+    (*)    = undefined -- _
+    abs    =undefined -- _
+    signum =undefined -- _
 
 delay :: MonadIO m => USecond -> m ()
 delay t = liftIO $ do

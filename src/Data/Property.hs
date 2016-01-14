@@ -1,4 +1,5 @@
-module Data.Property (
+module Data.Property
+(
     -- * Types
     Transition,
     Property,
@@ -9,6 +10,7 @@ module Data.Property (
     pMeta,
     getPropertyMeta,
     PropertyConf(..),
+    PropertyEvent(..),
     TransitionState(..),
     StateMap(..),
     failState,
@@ -19,21 +21,19 @@ module Data.Property (
     localDrivenState,
     -- * Create property
     newProperty,
-    -- newLocalCache,
     -- * Events
     cacheState,
     subscribeReturn,
     nextReturn,
     subscribeValue,
-    nextValue,
     subscribeState,
+    subscribeEvent,
     -- * Simple property access
     readProperty,
     writeProperty,
     trackProperty,
     -- * Transition access
     transiteTo,
-    waitTransition,
     currentTransitionTarget,
     askStatus,
     requestStatus,
@@ -41,20 +41,24 @@ module Data.Property (
     cacheInvalidate,
     -- * Exceptions
     OutScopeTracking(..),
+    TrackerKilled(..),
     WhyNotStart(..)
-) where
+)
+where
 
 -- base
 import Control.Applicative
+import Control.Exception    ( assert )
 import Control.Monad
 
+-- import Data.Functor
 import Data.Functor.Identity
 import Data.Typeable
 import Data.Maybe
 
 -- stm
-import Control.Concurrent.STM.TVar
 import Control.Concurrent.STM.TChan
+import Control.Concurrent.STM.TVar
 
 import Control.Monad.STM
 
@@ -78,37 +82,57 @@ import Control.Monad.Action.Internal
 type Transition dev eff s f b m a = Action dev eff (ReaderT (Property dev s f b) m) a
 
 
+-- | You try await new tracker-event out of tracker scope. Tracker can be
+-- disable.
 data OutScopeTracking = OutScopeTracking TypeRep String
     deriving (Show, Typeable)
 
-instance Exception OutScopeTracking
+data TrackerKilled = TrackerKilled TypeRep String
+    deriving (Show, Typeable)
 
+instance Exception OutScopeTracking
+instance Exception TrackerKilled
+
+data TransitionId a = TransitionId
+    { transitionFrom          :: !a
+    , transitionTo            :: !a
+    , transitionRunningStatus :: !(TVar Bool) }
+    deriving (Eq, Typeable)
 
 data Property dev s f a = Property
     { propertyConf         :: PropertyConf dev s f a
     , propertyCache        :: TVar (Maybe (f a))
-    , propertyTransTarget  :: TVar (Maybe a)
-    , propertyStream       :: TChan (f a)
+    , propertyTransId      :: TVar (Maybe (TransitionId a))
+    , propertyEventStream  :: TChan (PropertyEvent f a)
     , propertySubscribes   :: TVar Integer
     , propertyTrackerState :: TVar (Maybe (Either SomeException ())) }
     deriving Typeable
 
 
 data PropertyMeta a = PropertyMeta
-    { propertyName  :: String               -- ^ Name
-    , propertyValid :: a -> Either String a -- ^ Validator/corrector
-    , propertyEq    :: a -> a -> Bool       -- ^ Compare complete state
+    { propertyName         :: String               -- ^ Name
+    , propertyStartTimeout :: Int                  -- ^ 
+    , propertyValid        :: a -> Either String a -- ^ Validator/corrector
+    , propertyEq           :: a -> a -> Bool       -- ^ Compare complete state
     } deriving Typeable
+
 
 -- | Default Property metadata.
 pMeta :: Eq a => PropertyMeta a
-pMeta = PropertyMeta { propertyName = "", propertyValid = return, propertyEq = (==) }
+pMeta = PropertyMeta
+    { propertyName = ""
+    , propertyStartTimeout = -1
+    , propertyValid = return
+    , propertyEq = (==) }
 
 
 -- | Property metadata accessor.
 getPropertyMeta :: Property dev s f a -> PropertyMeta a
 getPropertyMeta = propertyMeta . propertyConf
 
+
+getPropertyDevTypeRep :: forall dev s f a. Typeable dev => Property dev s f a -> TypeRep
+getPropertyDevTypeRep _ = typeOf (Proxy :: Proxy dev)
 
 data PropertyConf dev s f a = PropertyConf
     { propertyMeta    :: PropertyMeta a
@@ -119,6 +143,7 @@ data PropertyConf dev s f a = PropertyConf
     , propertyMutator :: forall m. MonadUnderA m => a -> forall eff. Transition dev (Impure eff) s f a m () }
     deriving Typeable
 
+
 -- | Run custom transition with property
 withProperty :: Monad m => Property dev s f a -> Transition dev eff s f a m b -> Action dev eff m b
 withProperty p = unsafeMapAction (flip runReaderT p)
@@ -126,6 +151,8 @@ withProperty p = unsafeMapAction (flip runReaderT p)
 
 data PropertySelector dev f a = PSel (forall s. dev s -> Property dev s f a)
 
+
+-- | Run custom transition with selected Property
 selectProperty :: Monad m =>
     PropertySelector dev f a ->
     (forall s. Transition dev eff s f a m b) ->
@@ -133,7 +160,7 @@ selectProperty :: Monad m =>
 selectProperty (PSel selector) act = withDevice $ \dev ->  withProperty (selector dev) act
 
 
-withTracker :: forall dev s f a m b. (Typeable dev, MonadUnderA m) => Property dev s f a -> (STM () -> m b) -> m b
+withTracker :: (Typeable dev, MonadUnderA m) => Property dev s f a -> (STM () -> m b) -> m b
 withTracker prop callback = bracket
     (liftIO $ atomically $ do
         modifyTVar (propertySubscribes prop) (+1)
@@ -143,28 +170,25 @@ withTracker prop callback = bracket
         modifyTVar (propertySubscribes prop) (\x -> x - 1)
         writeTVar lock False)
 
-    (\lock ->
-        let outScopeCheck = do
-                c <- readTVar lock
-                unless c $ throwM $ OutScopeTracking (typeRep (Proxy :: Proxy dev)) (propertyName $ propertyMeta $ propertyConf prop)
-
-        in callback outScopeCheck)
+    (\lock -> callback $ do
+        c <- readTVar lock
+        unless c $ throwM $ OutScopeTracking (getPropertyDevTypeRep prop) (propertyName $ getPropertyMeta prop))
 
 
 cacheState :: Property dev s f a -> STM (Maybe (f a))
 cacheState = readTVar . propertyCache
 
 
-subscribeReturn :: (Typeable dev, StateMap f a, MonadUnderA m) => Property dev s f a -> (STM (f a) -> m b) -> m b
+subscribeReturn :: (Typeable dev, IfImpure eff, StateMap f a, MonadUnderA m) => Property dev s f a -> (STM (f a) -> Action dev eff m b) -> Action dev eff m b
 subscribeReturn prop callback = subscribeState prop $ \event ->
     callback $ fix $ \next -> do
         val <- event
         if progressState val
-            then return val
-            else next
+            then next
+            else return val
 
 
-nextReturn :: (Typeable dev, StateMap f a, MonadUnderA m) => Property dev s f a -> m (f a)
+nextReturn :: (Typeable dev, StateMap f a, IfImpure eff, MonadUnderA m) => Property dev s f a -> Action dev eff m (f a)
 nextReturn prop = subscribeReturn prop (liftIO . atomically)
 
 
@@ -174,47 +198,61 @@ subscribeValue prop callback = subscribeState prop $ \event -> do
     callback $ fix $ \next -> do
         val <- event
         case completeState val of
-            Just v              -> return v
+            Just v                     -> return v
             Nothing
-                | stuck (stateMap val)      -> _
-                | otherwise                 -> next
+                | stuck (stateMap val) -> assert False undefined
+                | otherwise            -> next
 
 
-nextValue :: (IfImpure eff, Typeable dev, StateMap f a, MonadUnderA m) => Property dev s f a -> Action dev eff m a
-nextValue prop = subscribeValue prop (liftIO . atomically)
-
-
-subscribeState :: (Typeable dev, MonadUnderA m) => Property dev s f a -> (STM (f a) -> m b) -> m b
-subscribeState prop callback = withTracker prop $ \outScopeCheck -> do
-    tchan <- liftIO $ atomically $ dupTChan $ propertyStream prop
-
-    let notTrack = do
+subscribeEvent :: (StateMap f a, IfImpure eff, Typeable dev, MonadUnderA m) => Property dev s f a -> (STM (PropertyEvent f a) -> Action dev eff m b) -> Action dev eff m b
+subscribeEvent prop callback = withTracker prop $ \outScopeCheck -> do
+    stat  <- withProperty prop askStatus
+    event <- liftIO $ atomically $ do
+        mstat <- cacheState prop
+        tchan <- dupTChan $ propertyEventStream prop
+        maybe (unGetTChan tchan (StateE stat)) (\stat' -> unGetTChan tchan (StateE stat') >> unGetTChan tchan (CacheE True)) mstat
+        return tchan
+    callback $ do
+        outScopeCheck
+        readTChan event <|> notTrack
+    where
+        notTrack = do
             status <- readTVar $ propertyTrackerState prop
-            case status of
-                Nothing -> empty
-                Just _  -> throwM (_ :: SomeException)
-
-    callback $ outScopeCheck >> readTChan tchan <|> notTrack
+            guard $ isJust status
+            throwM $ TrackerKilled (getPropertyDevTypeRep prop) (propertyName $ getPropertyMeta prop)
 
 
+subscribeState :: (StateMap f a, IfImpure eff, Typeable dev, MonadUnderA m) => Property dev s f a -> (STM (f a) -> Action dev eff m b) -> Action dev eff m b
+subscribeState prop callback = subscribeEvent prop $ \event ->
+    callback $ fix $ \again -> event >>= maybe again return . stateEvent
+
+
+-- | Wait current transition complete and start transition to new value
+--
+-- > writeProperty prop val1
+-- > writeProperty prop val2
+--
+-- transite 'prop' first to 'val1', then to 'val2'.
 writeProperty :: (Typeable dev, MonadUnderA m, StateMap f a) => Property dev s f a -> a -> Action dev (Impure eff) m ()
 writeProperty prop val = withProperty prop $ do
+    -- Wait recent transition end
+    readProperty prop
     ereason <- transiteTo val
     case ereason of
-        Left ZeroMove                   -> return ()
         Left InappropriateStateForStart -> error "Inappropriate state for start"
+        Left (StartingTimeoutFail t)    -> error ("Transition starting too long: over " ++ show t ++ "us")
         Left (ValidatorFail str)        -> error str
-        Right _                         -> waitTransition
+        _                               -> return ()
 
 
+-- | Wait current transition complete and return completeed value
+--
+-- > writeProperty prop val
+-- > x <- readProperty prop
+--
+-- 'x' == 'val1'
 readProperty :: (Typeable dev, MonadUnderA m, IfImpure eff, StateMap f b) => Property dev s f b -> Action dev eff m b
-readProperty prop = withProperty prop $ subscribeValue prop $ \event -> do
-    stat <- askStatus
-    case completeState stat of
-        Just v               -> return v
-        Nothing
-            | failState stat -> _
-            | otherwise      -> liftIO (atomically event)
+readProperty prop = subscribeValue prop $ liftIO . atomically
 
 
 trackProperty :: (Typeable dev, MonadUnderA m, IfImpure eff, StateMap f b) => Property dev s f b -> (f b -> Action dev eff m ()) -> Action dev eff m ()
@@ -229,7 +267,11 @@ trackProperty prop act = do
         stopCondition = not . progressState
 
 
-data WhyNotStart = ZeroMove | InappropriateStateForStart | ValidatorFail String
+data WhyNotStart
+    = ZeroMove
+    | InappropriateStateForStart
+    | ValidatorFail String
+    | StartingTimeoutFail Int
     deriving (Eq, Ord, Show, Typeable)
 
 
@@ -239,49 +281,54 @@ transiteTo target = runExceptT $ do
     cTarget  <- ExceptT $ return $ either (Left . ValidatorFail) Right $ propertyValid (getPropertyMeta prop) target
     oldState <- ExceptT $ maybe (Left InappropriateStateForStart) Right . completeState <$> askStatus
     when (propertyEq (getPropertyMeta prop) oldState cTarget) $ throwE ZeroMove
-    lift $ do
-        cacheInvalidate
-        liftIO $ atomically $ writeTVar (propertyTransTarget prop) (Just cTarget)
-        propertyMutator (propertyConf prop) cTarget
-        liftIO $ subscribeState prop $ \event -> fix $ \next -> do
-            val <- atomically event
-            forM_ (resultState val) $ \cState -> when (propertyEq (getPropertyMeta prop) oldState cState) next
-    return cTarget
+    ExceptT $ bracketOnError
+        (liftIO $ (,) <$>
+            (atomically $ do
+                cacheInvalidateSTM prop
+                var <- newTVar False
+                writeTVar (propertyTransId prop) $ Just TransitionId
+                    { transitionTo = cTarget, transitionFrom = oldState, transitionRunningStatus = var }
+                writeTChan (propertyEventStream prop) (TargetE (Just cTarget))
+                return var) <*>
+            (if propertyStartTimeout (getPropertyMeta prop) < 0
+                then newTVarIO False
+                else registerDelay (propertyStartTimeout $ propertyMeta $ propertyConf prop)))
+
+        (const $ liftIO $ atomically $ transitionInvalidateSTM prop)
+
+        (\(var, timer) -> do
+            propertyMutator (propertyConf prop) cTarget
+            subscribeState prop $ \event -> liftIO $ do
+                mval <- atomically ((Just <$> event) <|> (readTVar timer >>= guard >> return Nothing))
+                case mval of
+                    Nothing -> do
+                        atomically $ transitionInvalidateSTM prop
+                        return $ Left $ StartingTimeoutFail $ propertyStartTimeout $ getPropertyMeta prop
+
+                    _       -> do
+                        atomically $ writeTVar var True
+                        return $ Right cTarget)
 
 
-transitionStuckCondition :: (MonadUnderA m, StateMap f a, IfImpure eff) => Transition dev eff s f a m (TransitionState a -> Bool)
+transitionStuckCondition :: (MonadUnderA m, StateMap f a, IfImpure eff) => Action dev eff m (f a -> Bool)
 transitionStuckCondition = ifImpure impureCondition pureCondition
     where
-        impureCondition st = case stateMap st of
-            Fail                    -> True
-            LocalDrivenIntermediate -> True
-            _                       -> False
+        impureCondition st = stateMap st == Fail || stateMap st == LocalDrivenIntermediate
 
-        pureCondition st = stateMap st == Fail
+        pureCondition st   = stateMap st == Fail
 
 
-waitTransition :: (Typeable dev, IfImpure eff, StateMap f a, MonadUnderA m) => Transition dev eff s f a m ()
-waitTransition = do
-    prop           <- ask
-    transSt        <- stateMap <$> askStatus
-    mtarget        <- currentTransitionTarget
-    stuckCondition <- transitionStuckCondition
-    let condition = propertyEq (getPropertyMeta prop)
-    case transSt of
-        _ | stuckCondition transSt  -> _
-        Final v | Just t <- mtarget -> unless (condition t v) _
-        RemoteDriven                -> do
-            pos <- nextValue prop
-            forM_ mtarget $ \target -> unless (condition target pos) _
-        LocalDrivenIntermediate     -> do
-            pos <- nextValue prop
-            forM_ mtarget $ \target -> unless (condition target pos) _
-        _                           -> return ()
+transitionTargetEvent :: MonadUnderA m => Transition dev eff s f a m (STM (Maybe a))
+transitionTargetEvent = asks $ \prop -> runMaybeT $ do
+    trId <- MaybeT $ readTVar (propertyTransId prop)
+    return $ transitionTo trId
+
 
 currentTransitionTarget :: MonadUnderA m => Transition dev eff s f a m (Maybe a)
-currentTransitionTarget = ask >>= liftIO . atomically . readTVar . propertyTransTarget
+currentTransitionTarget = transitionTargetEvent >>= liftIO . atomically
 
 
+-- | Request property stataus from device
 requestStatus :: (StateMap f a, IfImpure eff, MonadUnderA m) => Transition dev eff s f a m (f a)
 requestStatus = ask >>= \prop -> do
     st <- propertyGetter $ propertyConf prop
@@ -289,52 +336,101 @@ requestStatus = ask >>= \prop -> do
     return st
 
 
+-- | Get property status from valid cache or request it from device
 askStatus :: (StateMap f a, IfImpure eff, MonadUnderA m) => Transition dev eff s f a m (f a)
 askStatus = ask >>= \prop ->
     liftIO (atomically $ readTVar $ propertyCache prop) >>= maybe requestStatus return
 
 
+commitStateSTM :: StateMap f a => Property dev s f a -> f a -> STM ()
+commitStateSTM prop val = void $ runMaybeT $ do
+    startingStateGuard <|> targetMissmatchCase <|> lift otherCase
+    where
+        -- If transition starting but not running skip all state equal old
+        -- state.
+        startingStateGuard  = do
+            result  <- MaybeT $ pure $ resultState val
+            transId <- MaybeT $ readTVar $ propertyTransId prop
+            c       <- lift $readTVar $ transitionRunningStatus transId
+            guard $ not c
+            guard $ not $ propertyEq (getPropertyMeta prop) (transitionFrom transId) result
+
+        -- If transition resulted but result not equal target state drop cache,
+        -- target and generate MissTargetE
+        targetMissmatchCase = do
+            result  <- MaybeT $ pure $ resultState val
+            transId <- MaybeT $ readTVar $ propertyTransId prop
+            guard $ not $ propertyEq (getPropertyMeta prop) result (transitionTo transId)
+            lift $ do
+                cacheInvalidateSTM prop
+                transitionInvalidateSTM prop
+                writeTChan (propertyEventStream prop) MissTargetE
+
+        otherCase = do
+            writeTChan (propertyEventStream prop) (StateE val)
+            when (localDrivenState val || failState val || propertyToCache (propertyConf prop) val) $ do
+                writeTVar (propertyCache prop) (Just val)
+                writeTChan (propertyEventStream prop) (CacheE True)
+            forM_ (completeState val) $ \_ ->
+                transitionInvalidateSTM prop
+
+
+transitionInvalidateSTM :: Property dev s f a -> STM ()
+transitionInvalidateSTM prop = do
+    mval  <- readTVar (propertyTransId prop)
+    forM_ mval $ \_ -> do
+        writeTVar (propertyTransId prop) Nothing
+        writeTChan (propertyEventStream prop) (TargetE Nothing)
+
+
+-- | Discard current cache value. Probably safe operation.
+cacheInvalidateSTM :: Property dev s f a -> STM ()
+cacheInvalidateSTM prop = do
+    mval <- readTVar (propertyCache prop)
+    forM_ mval $ \_ -> do
+        writeTVar (propertyCache prop) Nothing
+        writeTChan (propertyEventStream prop) (CacheE False)
+
+
 commitState :: (StateMap f a, MonadUnderA m) => f a -> Transition dev eff s f a m ()
 commitState val = do
     prop <- ask
-    liftIO $ atomically $ writeTChan (propertyStream prop) val
-    runMaybeT $ do
-        result <- MaybeT $ pure $ resultState val
-        target <- MaybeT $ liftIO $ atomically $ swapTVar (propertyTransTarget prop) Nothing
-        guard (not $ propertyEq (getPropertyMeta prop) result target)
-        lift cacheInvalidate
-        liftIO $ atomically $ writeTChan (propertyStream prop) (error "target not equal destination")
-    when (localDrivenState val || propertyToCache (propertyConf prop) val)
-        (liftIO $ atomically $ writeTVar (propertyCache prop) (Just val))
+    liftIO $ atomically $ commitStateSTM prop val
 
 
+-- | Discard current cache value. Probably safe operation.
 cacheInvalidate :: MonadUnderA m => Transition dev eff s f a m ()
-cacheInvalidate = ask >>= \prop -> liftIO $ atomically $ do
-    mval <- readTVar (propertyCache prop)
-    when (isJust mval) $ writeTVar (propertyCache prop) Nothing
+cacheInvalidate = ask >>= liftIO . atomically . cacheInvalidateSTM
 
 
 newProperty
-    :: (MonadUnderA m, MonadAccum (CreateCtx d (Action dev Create IO)) m, StateMap f a)
-    => Action (New dev) Create m (PropertyConf dev s f a, Maybe (f a)) -- ^
-    -> Action (New dev) Create m (Property dev s f a)
+    :: (Typeable dev, Typeable f, Typeable a, MonadUnderA m, MonadAccum (CreateCtx d (Action dev Create IO)) m, StateMap f a)
+    => Action (New dev) Create m (PropertyConf dev () f a, Maybe (f a)) -- ^
+    -> Action (New dev) Create m (Property dev () f a)
 newProperty constr = do
     cacheVar     <- liftIO $ newTVarIO Nothing
-    targetVar    <- liftIO $ newTVarIO Nothing
-    stream       <- liftIO newBroadcastTChanIO
+    transIdVar   <- liftIO $ newTVarIO Nothing
+    eventStream  <- liftIO newBroadcastTChanIO
     subs         <- liftIO $ newTVarIO 0
     resTrack     <- liftIO $ newTVarIO Nothing
     (conf, mval) <- constr
 
     let property = Property
             { propertyConf         = conf
+                { propertyMeta = (propertyMeta conf)
+                    { propertyName =
+                        if null (propertyName (propertyMeta conf))
+                            then show (typeOf property)
+                            else propertyName (propertyMeta conf)
+                    }
+                }
             , propertyCache        = cacheVar
-            , propertyTransTarget  = targetVar
-            , propertyStream       = stream
+            , propertyTransId      = transIdVar
+            , propertyEventStream  = eventStream
             , propertySubscribes   = subs
             , propertyTrackerState = resTrack }
 
-    forM_ mval $ liftIO . atomically . writeTVar cacheVar . Just
+    forM_ mval $ \_ -> liftIO $ atomically $ writeTVar cacheVar mval
 
     forM_ (propertyTracker conf) $ \tracker ->
         addToStage $ void $ pureAsync $ try (withProperty property $
@@ -342,20 +438,20 @@ newProperty constr = do
 
     return property
 
+data PropertyEvent f a
+    = StateE  !(f a)     -- ^ New state
+    | CacheE  !Bool      -- ^ Switch cache state
+    | TargetE !(Maybe a) -- ^ Switch transition target
+    | MissTargetE        -- ^ Transition target missmatch
+    deriving (Eq, Ord, Show, Read, Typeable)
 
--- newLocalCache :: (Eq a, MonadUnderA m) =>
---     PropertyMeta a ->
---     a ->
---     (forall m1. MonadUnderA m1 => a -> forall eff. Action dev (Impure eff) m1 ()) ->
---     Action dev Create m (Property dev () Identity a)
--- newLocalCache metaData initValue mutator = newProperty $ do
---     mutator initValue
---     return (PropertyConf
---         { propertyMeta    = metaData
---         , propertyToCache = const False
---         , propertyTracker = Nothing
---         , propertyMutator = \v -> (mutator v >> commitState (pure v)) `finally` cacheInvalidate
---         , propertyGetter  = error "FUUUUUUUU!!!" }, Just (pure initValue))
+
+-- | Any event contain state
+stateEvent :: StateMap f a => PropertyEvent f a -> Maybe (f a)
+stateEvent pev = case pev of
+    StateE st -> pure st
+    _         -> Nothing
+
 
 data TransitionState a
     = Final a
@@ -365,20 +461,21 @@ data TransitionState a
     | Fail
     deriving (Eq, Ord, Show, Read, Typeable)
 
-class (Eq a, Eq (f a)) => StateMap f a where
+class (Typeable a, Typeable f, Eq a, Eq (f a)) => StateMap f a where
     stateMap :: f a -> TransitionState a
 
-instance Eq s => StateMap TransitionState s where
+instance (Typeable s, Eq s) => StateMap TransitionState s where
     stateMap = id
 
-instance Eq a => StateMap Identity a where
+instance (Typeable a, Eq a) => StateMap Identity a where
     stateMap = Final . runIdentity
 
-instance Eq a => StateMap Maybe a where
+instance (Typeable a, Eq a) => StateMap Maybe a where
     stateMap = maybe RemoteDriven Final
 
-instance (Eq a, Eq b) => StateMap (Either b) a where
+instance (Typeable a, Typeable b, Eq a, Eq b) => StateMap (Either b) a where
     stateMap = either (const RemoteDriven) Final
+
 
 -- | Any complete state
 completeState :: StateMap f a => f a -> Maybe a
@@ -387,9 +484,11 @@ completeState val = case stateMap val of
     OtherComplete v -> pure v
     _               -> Nothing
 
+
 -- | Intermediate state with remote control
 progressState :: StateMap f a => f a -> Bool
 progressState val = stateMap val == RemoteDriven
+
 
 -- | Any state with local control except 'failState'
 localDrivenState :: StateMap f a => f a -> Bool
@@ -399,15 +498,18 @@ localDrivenState val = case stateMap val of
     LocalDrivenIntermediate -> True
     _                       -> False
 
+
 -- | Final transition state where state value equal transition target value
 resultState :: StateMap f a => f a -> Maybe a
 resultState val
     | Final v <- stateMap val = pure v
     | otherwise               = Nothing
 
+
 -- | Target not reachable
 failState :: StateMap f a => f a -> Bool
 failState val = stateMap val == Fail
+
 
 -- | Intermediate state with local control
 otherLocalDrivenState :: StateMap f a => f a -> Bool

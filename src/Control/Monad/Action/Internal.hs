@@ -24,7 +24,7 @@ import Control.Monad.STM
 -- internal
 import Control.Monad.Accum
 
-data Ways dev m a = Ways { impureWay :: forall eff. Action dev (Impure eff) m a, pureWay :: forall eff. Action dev eff m a }
+data Ways dev m a = Ways { impureWay :: forall eff. Action dev (Impure eff) m a, pureWay :: forall eff. IfImpure eff => Action dev eff m a }
 
 class IfImpure eff where
     ifImpureM :: Ways dev m a -> Action dev eff m a
