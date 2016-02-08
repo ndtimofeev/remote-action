@@ -1,9 +1,15 @@
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
+
 module Control.Monad.StaticScope
     ( AccuredDevice
     , AccureT
     , ScopeT
     , Impure
+    , Flist(..)
     , accure
+    , accures
     , fromScope
     , toScope
     , inScope
@@ -19,6 +25,22 @@ import Control.Concurrent.STM.TVar
 -- internal
 import Control.Monad.Action.Internal
 
+data Flist (p :: (* -> *) -> *) (c :: [* -> *]) where
+    Nil  :: Flist p '[]
+    (:.) :: p a -> Flist p as -> Flist p (a ': as)
+
+infixr 5 :.
+
+accures :: MonadUnderA m => Flist DeviceHandle devs -> (forall s. Flist (AccuredDevice s) devs -> ScopeT s m a) -> m a
+accures devs' action =
+    let (locks, accured) = go devs'
+    in withDevices locks $ \_ -> unScopeT $ action accured
+    where
+        go :: Flist DeviceHandle devs -> ([TVar DeviceAvailability], Flist (AccuredDevice s) devs)
+        go Nil           = ([], Nil)
+        go (dev :. devs) =
+            let (locks, accured) = go devs
+            in (uncurry (:) (handleLockPart dev) ++ locks, MkAccuredDevice dev :. accured)
 
 newtype AccureT m a = AccureT { unAccureT :: StateT [TVar DeviceAvailability] m a }
 

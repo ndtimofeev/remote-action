@@ -30,6 +30,7 @@ library
     Control.Concurrent.Utils,
     Control.Monad.Action,
     Control.Monad.Accum,
+    Control.Monad.Injectable,
     Data.Property,
 --    Control.Monad.Resumable,
     Control.Monad.StaticScope,
@@ -95,10 +96,12 @@ Test-Suite test
   default-extensions:
     TypeFamilies,
     ExistentialQuantification,
+    GADTs,
     GeneralizedNewtypeDeriving,
     DeriveDataTypeable,
     DeriveFoldable,
     DeriveTraversable,
+    DataKinds,
     MultiParamTypeClasses,
     FunctionalDependencies,
     FlexibleContexts,
@@ -107,5 +110,6 @@ Test-Suite test
     ScopedTypeVariables,
     StandaloneDeriving,
     ConstraintKinds,
+    TypeOperators,
     RankNTypes
 
