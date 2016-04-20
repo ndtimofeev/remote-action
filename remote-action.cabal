@@ -31,6 +31,7 @@ library
     Control.Monad.Action,
     Control.Monad.Accum,
     Control.Monad.Injectable,
+    Control.Monad.Regions,
     Data.Property,
 --    Control.Monad.Resumable,
     Control.Monad.StaticScope,
