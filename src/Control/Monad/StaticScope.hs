@@ -1,20 +1,26 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE PolyKinds #-}
 {-# LANGUAGE GADTs #-}
 
 module Control.Monad.StaticScope
     ( AccuredDevice
-    , AccureT
-    , ScopeT
+--    , AccureT
+--    , ScopeT
     , Impure
     , Flist(..)
-    , accure
+--    , accure
     , accures
-    , fromScope
-    , toScope
-    , inScope
-    , scopeAction )
+    , accures'
+--    , fromScope
+--    , toScope
+--    , inScope
+--    , scopeAction
+    )
 where
+
+-- excpetions
+import Control.Monad.Catch
 
 -- mtl
 import Control.Monad.State.Strict
@@ -23,42 +29,43 @@ import Control.Monad.State.Strict
 import Control.Concurrent.STM.TVar
 
 -- internal
+import Control.Monad.Regions
 import Control.Monad.Action.Internal
 
-data Flist (p :: (* -> *) -> *) (c :: [* -> *]) where
+data Flist (p :: k -> *) (c :: [k]) where
     Nil  :: Flist p '[]
     (:.) :: p a -> Flist p as -> Flist p (a ': as)
 
 infixr 5 :.
 
-accures :: MonadUnderA m => Flist DeviceHandle devs -> (forall s. Flist (AccuredDevice s) devs -> ScopeT s m a) -> m a
-accures devs' action =
-    let (locks, accured) = go devs'
-    in withDevices locks $ \_ -> unScopeT $ action accured
+-- |
+-- > accures (dynHnd0 :. dynHnd1 :. dynHnd2 :. Nil) $
+-- >     \(staticHnd0 :. staticHnd0 :. staticHnd0 :. Nil) -> do
+-- >         doSomeThingWith staticHnd0
+-- >         doSomeThingWith staticHnd1
+-- >         doSomeThingWith staticHnd2
+accures :: MonadUnderA m => Flist DeviceHandle devs -> (forall s. Flist (AccuredDevice s) devs -> Region s m a) -> m a
+accures dynHnds action = region (regionAct dynHnds action)
     where
+        regionAct :: MonadUnderA m => Flist DeviceHandle devs -> (Flist (AccuredDevice s) devs -> Region s m a) -> Region s m a
+        regionAct d f =
+            let (locks, hnds) = go d
+            in withDevices locks $ const $ f hnds
+
         go :: Flist DeviceHandle devs -> ([TVar DeviceAvailability], Flist (AccuredDevice s) devs)
         go Nil           = ([], Nil)
         go (dev :. devs) =
             let (locks, accured) = go devs
             in (uncurry (:) (handleLockPart dev) ++ locks, MkAccuredDevice dev :. accured)
 
-newtype AccureT m a = AccureT { unAccureT :: StateT [TVar DeviceAvailability] m a }
-
-newtype ScopeT s m a = ScopeT { unScopeT :: m a }
-    deriving (Applicative, Functor, Monad)
-
-accure :: Monad m => AccureT m a -> m a
-accure expr = evalStateT (unAccureT expr) []
-
-toScope :: Monad m => DeviceHandle dev -> (forall s. AccuredDevice s dev -> AccureT m a) -> AccureT m a
-toScope devHnd action = AccureT $ do
-    modify (++ uncurry (:) (handleLockPart devHnd))
-    unAccureT $ action $ MkAccuredDevice devHnd
-
-inScope :: MonadUnderA m => ScopeT s m a -> AccureT m a
-inScope action = AccureT $ StateT $ \s -> do
-    v <- withDevices s $ \_ -> unScopeT action
-    return (v, s)
-
-scopeAction :: Monad m => AccuredDevice s dev -> Action dev (Impure s) m a -> ScopeT s m a
-scopeAction (MkAccuredDevice devHnd) = ScopeT . unsafeAction devHnd
+accures' :: (MonadCatch n, InScope m (Region s n), MonadUnderA m) => Flist DeviceHandle devs -> Region s m (Flist (AccuredDevice s) devs)
+accures' dynHnds = do
+    let (_, hnds) = go dynHnds
+    onExit (error "Final" `onException` error "Final2")
+    return hnds
+    where
+        go :: Flist DeviceHandle devs -> ([TVar DeviceAvailability], Flist (AccuredDevice s) devs)
+        go Nil           = ([], Nil)
+        go (dev :. devs) =
+            let (locks, accured) = go devs
+            in (uncurry (:) (handleLockPart dev) ++ locks, MkAccuredDevice dev :. accured)
