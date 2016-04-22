@@ -23,7 +23,7 @@ where
 import Control.Monad.Catch
 
 -- mtl
-import Control.Monad.State.Strict
+-- import Control.Monad.State.Strict
 
 -- stm
 import Control.Concurrent.STM.TVar
