@@ -61,12 +61,12 @@ data Output s = Output
     deriving Typeable
 
 type instance Proto Output = GSIOC
-type instance Proto Probe  = GSIOC
+-- type instance Proto Probe  = GSIOC
 type instance Proto QuadZ  = GSIOC
 
-data Probe s = Probe
-    { zAxisPosition    :: Property Probe s Position Deci
-    , liquidLevelSens  :: Property Probe s Identity Word8
+data Probe dev s = Probe
+    { zAxisPosition    :: Property dev s Position Deci
+    , liquidLevelSens  :: Property dev s Identity Word8
     , liquidLevelOut   :: TChan Bool }
     deriving Typeable
 
@@ -75,7 +75,7 @@ data QuadZ s = QuadZ
     , probeWidth       :: Property QuadZ s Position Deci
     , quadZWorkspace   :: (Range Deci, Range Deci, Range Deci)
     , handToHome       :: forall m eff inner. (MonadUnderA inner, InScope m (Action QuadZ (Impure eff) inner), MonadUnderA m) => Action QuadZ (Impure eff) m ()
-    , probes           :: Probes (AccuredDevice s Probe) }
+    , probes           :: Probes (Probe QuadZ s) }
     deriving Typeable
 
 data Nebula215 hand s = Nebula215
@@ -192,7 +192,7 @@ value n = (replicateM_ n (char '?') $> Nothing) <|> (Just . MkFixed <$> number)
 data Probes a = Probes { aProbe :: a, bProbe :: a, cProbe :: a, dProbe :: a }
     deriving (Eq, Ord, Show, Typeable, Foldable, Functor, Traversable)
 
-data ProbeSel = ProbeSel (forall a. Probes a -> a)
+data Select f = Select (forall a. f a -> a)
 
 data MotorDigest a = MotorDigest
     { xMotor      :: a
@@ -221,7 +221,7 @@ zPosition :: (Typeable dev, Proto dev ~ GSIOC, MonadUnderA m) => Action dev eff 
 zPosition = immediateParsec 'Z' $ Probes
     <$> value 4 <*> (char ',' >> value 4) <*> (char ',' >> value 4) <*> (char ',' >> value 4)
 
-probeStatus :: MonadUnderA m => (forall a. Probes a -> a) -> Action Probe eff m (Position Deci)
+probeStatus :: MonadUnderA m => (forall a. Probes a -> a) -> Action QuadZ eff m (Position Deci)
 probeStatus selector = do
     motor <- (selector . probesMotor) <$> motorStatus
     if motor `notElem` [MotorRunning, MotorPowered]
@@ -235,7 +235,7 @@ probeStatus selector = do
                 Nothing                     -> Homeing
 
 
-motorStatus :: (Typeable dev, MonadUnderA m, {- Nominal dev ~ QuadZ, -} Proto dev ~ GSIOC) => Action dev eff m (MotorDigest MotorStatus)
+motorStatus :: (Typeable dev, MonadUnderA m, Nominal dev ~ QuadZ, Proto dev ~ GSIOC) => Action dev eff m (MotorDigest MotorStatus)
 motorStatus = immediateParsec 'm' $ (\xM yM aM bM cM dM pM -> MotorDigest xM yM (Probes aM bM cM dM) pM)
     <$> parseStatus <*> parseStatus <*> parseStatus <*> parseStatus <*> parseStatus <*> parseStatus <*> parseStatus
     where
@@ -271,19 +271,19 @@ newGsiocVariable
 newGsiocVariable meta conf = do
     var  <- liftIO $ newTVarIO (const False)
     prop <- newProperty meta PropertyConf
-                { mkPropertyGetter    = mkGsiocGetter conf
-                , mkPropertyMutator   = mkGsiocMutator conf
-                , mkPropertyWaiter    = \prop -> fix $ \onemore -> do
-                    val  <- requestStatus prop
-                    cond <- liftIO $ readTVarIO var
-                    if cond val
-                        then delay (100 ms) >> onemore
-                        else do
-                            liftIO $ atomically $ writeTVar var (==val)
-                            return val
-                , mkPropertyMissTargetHandler = mkGsiocMissTargetHandler conf
-                , mkPropertyTimeoutHandler    = mkGsiocTimeoutHandler conf
-                , mkPropertyFailStateHandler  = mkGsiocFailStateHandler conf }
+        { mkPropertyGetter    = mkGsiocGetter conf
+        , mkPropertyMutator   = mkGsiocMutator conf
+        , mkPropertyWaiter    = \prop -> fix $ \onemore -> do
+            val  <- requestStatus prop
+            cond <- liftIO $ readTVarIO var
+            if cond val
+                then delay (100 ms) >> onemore
+                else do
+                    liftIO $ atomically $ writeTVar var (==val)
+                    return val
+        , mkPropertyMissTargetHandler = mkGsiocMissTargetHandler conf
+        , mkPropertyTimeoutHandler    = mkGsiocTimeoutHandler conf
+        , mkPropertyFailStateHandler  = mkGsiocFailStateHandler conf }
     addToStage $ void $ requestStatus prop
     return prop
 
@@ -313,8 +313,8 @@ mkQZ box@(xRng, yRng, zRng) = do
 
     let probeLetter = Probes 'a' 'b' 'c' 'd'
 
-    probesHnd <- forM (Probes (ProbeSel aProbe) (ProbeSel bProbe) (ProbeSel cProbe) (ProbeSel dProbe)) $
-        \(ProbeSel selector) -> mkSubDevice $ do
+    probesHnd <- forM (Probes (Select aProbe) (Select bProbe) (Select cProbe) (Select dProbe)) $
+        \(Select selector) -> do
             zPos <- newGsiocVariable
                 (mkMeta $ "Z position " ++ [toUpper (selector probeLetter)] ++ " probe") { mkPropertyValidator = rangeValidate (fst zRng) (snd zRng) }
                 (gsiocPropertyConf
@@ -330,9 +330,12 @@ mkQZ box@(xRng, yRng, zRng) = do
             liftIO $ atomically $ do
                 cacheInvalidateSTM posProp
                 cacheInvalidateSTM widthProp
+                forM_ probesHnd $ cacheInvalidateSTM . zAxisPosition
             buffered "H"
             mkTransition posProp (Just (fst xRng, fst yRng)) (return ())
             mkTransition widthProp (Just 18) (return ())
+            forM_ probesHnd $ \probe -> do
+                mkTransition (zAxisPosition probe) Nothing (return ())
             return ()
         , probes         = probesHnd
         , quadZWorkspace = box }
