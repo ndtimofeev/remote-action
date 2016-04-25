@@ -23,7 +23,7 @@ flag debug
   default:     False
 
 library
-  ghc-options: -Wall -O2 -fno-warn-orphans -fno-warn-unused-do-bind -fdefer-typed-holes -fno-warn-typed-holes
+  ghc-options: -Wall -O2 -fno-warn-orphans -fno-warn-unused-do-bind
   other-modules:
     Control.Monad.Action.Internal
   exposed-modules:
@@ -31,14 +31,13 @@ library
     Control.Concurrent.Utils,
     Control.Monad.Action,
     Control.Monad.Accum,
+    Control.Monad.Injectable,
+    Control.Monad.Regions,
     Data.Property,
 --    Control.Monad.Resumable,
---    Control.Monad.RemoteMonad,
     Control.Monad.StaticScope,
---    Control.Monad.Statemachine,
     System.Hardware.GSIOC,
     System.Hardware.GSIOC.Raw,
---    System.Hardware.Gilson.Devices,
 --    System.Hardware.Gilson.OrbitalShaker,
 --    System.Hardware.Gilson.Pump306,
 --    System.Hardware.Gilson.VALVEMATE,
@@ -78,6 +77,36 @@ library
   hs-source-dirs:      src
   default-language:    Haskell2010
 
-  if flag( debug )
-    build-depends: QuickCheck, random
-    exposed-modules: Data.Property.Test
+Test-Suite test
+  type:                detailed-0.9
+  test-module:         Test
+  other-modules:     Test.Data.Property
+  hs-source-dirs:      test
+  build-depends:
+    base,
+    Cabal,
+    mtl,
+    random,
+    remote-action,
+    transformers,
+    QuickCheck
+  default-language:    Haskell2010
+  default-extensions:
+    TypeFamilies,
+    ExistentialQuantification,
+    GADTs,
+    GeneralizedNewtypeDeriving,
+    DeriveDataTypeable,
+    DeriveFoldable,
+    DeriveTraversable,
+    DataKinds,
+    MultiParamTypeClasses,
+    FunctionalDependencies,
+    FlexibleContexts,
+    FlexibleInstances,
+    UndecidableInstances,
+    ScopedTypeVariables,
+    StandaloneDeriving,
+    ConstraintKinds,
+    TypeOperators,
+    RankNTypes

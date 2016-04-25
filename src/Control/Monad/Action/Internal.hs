@@ -23,8 +23,11 @@ import Control.Monad.STM
 
 -- internal
 import Control.Monad.Accum
+import Control.Monad.Injectable
+import Control.Monad.Regions
 
-data Ways dev m a = Ways { impureWay :: forall eff. Action dev (Impure eff) m a, pureWay :: forall eff. Action dev eff m a }
+
+data Ways dev m a = Ways { impureWay :: forall eff. Action dev (Impure eff) m a, pureWay :: forall eff. IfImpure eff => Action dev eff m a }
 
 class IfImpure eff where
     ifImpureM :: Ways dev m a -> Action dev eff m a
@@ -127,7 +130,9 @@ data DeviceHandle dev = MkDeviceHandle
 type MonadUnderA m = (MonadMask m, MonadIO m)
 
 newtype Action dev eff m a = Action { unAction :: ReaderT (DeviceHandle dev) m a }
-    deriving (Applicative, Functor, Monad, MonadCatch, MonadIO, MonadMask, MonadThrow, MonadTrans)
+    deriving (Applicative, Functor, Monad, MonadCatch, MonadIO, MonadMask, MonadThrow, MonadTrans, Injectable)
+
+instance InScope m r => InScope (Action dev eff m) r
 
 instance (Monad m, MonadAccum w m) => MonadAccum w (Action dev eff m) where
     accum = lift . accum

@@ -1,5 +1,5 @@
 module Control.Concurrent.Utils
-    ( USecond, TimeMult(..), us, ms, s, m, h, d, w, y, timeout, timeout', delay, never )
+    ( USecond, TimeMult(..), us, ms, s, m, h, d, w, y, timeout, timeoutSTM, timeout', timeoutSTM', delay, never )
 where
 
 -- base
@@ -14,6 +14,9 @@ import Data.Ratio
 
 -- exceptions
 import Control.Monad.Catch
+
+-- stm
+import Control.Monad.STM
 
 -- transformers
 import Control.Monad.IO.Class
@@ -56,15 +59,15 @@ y  = TimeMult (365 * usPerQuant d)
 
 instance Num a => Fractional (TimeMult -> a) where
     fromRational r (TimeMult k) = fromInteger (numerator r * k `div` denominator r)
-    recip = _
+    recip =undefined -- _
 
 instance Num a => Num (TimeMult -> a) where
     fromInteger i (TimeMult k) = fromInteger (i * k)
-    (+)    = _
-    (-)    = _
-    (*)    = _
-    abs    = _
-    signum = _
+    (+)    = undefined -- _
+    (-)    = undefined -- _
+    (*)    = undefined -- _
+    abs    =undefined -- _
+    signum =undefined -- _
 
 delay :: MonadIO m => USecond -> m ()
 delay t = liftIO $ do
@@ -88,12 +91,33 @@ timeout' ex t act = do
 
         (const act)
 
+timeoutSTM' :: (MonadIO m, MonadMask m) => Exception e => e -> STM () -> m a -> m a
+timeoutSTM' ex stm act = do
+    tid  <- liftIO myThreadId
+    bracket
+        (liftIO $ forkIO $ atomically stm >> throwTo tid ex)
+
+        (uninterruptibleMask_ . liftIO . killThread)
+
+        (const act)
+
 timeout :: (MonadIO m, MonadMask m) => USecond -> m a -> m (Maybe a)
 timeout t act = do
     tid <- liftIO myThreadId
     uid <- liftIO newUnique
     bracket
         (liftIO $ forkIO $ delay t >> throwTo tid (Timeout uid))
+
+        (uninterruptibleMask_ . liftIO . killThread)
+
+        (\_ -> catchIf (\e -> uid == timeoutUid e) (Just <$> act) (\_ -> return Nothing))
+
+timeoutSTM :: (MonadIO m, MonadMask m) => STM () -> m a -> m (Maybe a)
+timeoutSTM stm act = do
+    tid <- liftIO myThreadId
+    uid <- liftIO newUnique
+    bracket
+        (liftIO $ forkIO $ atomically stm >> throwTo tid (Timeout uid))
 
         (uninterruptibleMask_ . liftIO . killThread)
 
