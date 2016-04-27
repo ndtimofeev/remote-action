@@ -41,9 +41,9 @@ instance MonadTrans (Region s) where
     lift = Region
 
 instance Injectable (Region s) where
-    injection f (Region eval) = Region (f eval)
-    safeMap   f (Region eval) = Region (f eval)
-    withTrans f (Region eval) = Region (f eval)
+    injection  f (Region eval) = Region (f eval)
+    safeMap    f (Region eval) = Region (f eval)
+    withTrans  f (Region eval) = Region (f eval)
 
 region :: (forall s. Region s m a) -> m a
 region = unRegion
@@ -68,9 +68,9 @@ instance MonadTrans (Scope r) where
     lift = Scope . lift
 
 instance Injectable (Scope r) where
-    injection f (Scope eval) = Scope $ injection f eval
-    safeMap   f (Scope eval) = Scope $ safeMap f eval
-    withTrans f (Scope eval) = Scope $ withTrans f eval
+    injection  f (Scope eval) = Scope $ injection f eval
+    safeMap    f (Scope eval) = Scope $ safeMap f eval
+    withTrans  f (Scope eval) = Scope $ withTrans f eval
 
 ioscope :: (MonadMask m, MonadIO m) => Scope m m a -> m a
 ioscope eval = bracket
@@ -82,7 +82,7 @@ scope :: (Monad m, MonadIO (t m), Injectable t, MonadMask (t m)) => t (Scope (t 
 scope eval = bracket
     (liftIO $ newIORef $ return ())
     (join . liftIO . readIORef)
-    (\ref -> injection (flip runReaderT ref . unScope) eval)
+    (\ref -> injection_ (flip runReaderT ref . unScope) eval)
 
 rescope :: (Monad m, Monad (t m), MonadIO (t (Scope r m)), Injectable t, MonadMask (t (Scope r m))) => t (Scope (t m) m) c -> t (Scope r m) c
 rescope eval = bracket

@@ -3,6 +3,7 @@ module Control.Monad.Accum
     , runAccumT
     , MAccumT
     , runMAccumT
+    , runMAccumT'
     , Finalize
     , evalFinalize
     , MonadAccum(..) )
@@ -43,6 +44,9 @@ runMAccumT eval = do
     acc <- liftIO $ readIORef ref
     return (val, acc)
 
+runMAccumT' :: IORef w -> MAccumT w m a -> m a
+runMAccumT' ref eval = runReaderT (unMAccumT eval) ref
+
 type Finalize n m = MAccumT (n ()) m
 
 
@@ -51,17 +55,19 @@ evalFinalize eval =
     bracket
         (lift $ liftIO $ newIORef mempty)
         (\ref -> join $ lift $ liftIO $ readIORef ref)
-        (\ref -> injection (\m -> runReaderT (unMAccumT m) ref) eval)
+        (\ref -> injection_ (\m -> runReaderT (unMAccumT m) ref) eval)
 
 class Monad m => MonadAccum w m | m -> w where
     accum :: w -> m ()
+
+    default accum :: (MonadAccum w m, MonadTrans t) => w -> t m ()
+    accum = lift . accum
 
 instance (Monoid w, MonadReader r m) => MonadReader r (AccumT w m) where
     ask     = lift ask
     local f = AccumT . local f . unAccumT
 
-instance (Monad m, MonadAccum w m) => MonadAccum w (ReaderT r m) where
-    accum = lift . accum
+instance (Monad m, MonadAccum w m) => MonadAccum w (ReaderT r m)
 
 instance (MonadIO m, Monoid w) => MonadAccum w (MAccumT w m) where
     accum w = MAccumT $ do
