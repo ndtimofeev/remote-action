@@ -24,20 +24,17 @@ flag debug
 
 library
   ghc-options: -Wall -O2 -fno-warn-orphans -fno-warn-unused-do-bind
-  other-modules:
-    Control.Monad.Action.Internal
   exposed-modules:
-    Action2,
     Control.Concurrent.Utils,
     Control.Monad.Action,
     Control.Monad.Accum,
     Control.Monad.Injectable,
     Control.Monad.Regions,
+    Data.Flist,
     Data.Property,
 --    Control.Monad.Resumable,
-    Control.Monad.StaticScope,
     System.Hardware.GSIOC,
-    System.Hardware.GSIOC.Raw,
+    System.Hardware.GSIOC.Raw
 --    System.Hardware.Gilson.OrbitalShaker,
 --    System.Hardware.Gilson.Pump306,
 --    System.Hardware.Gilson.VALVEMATE,
@@ -61,7 +58,8 @@ library
     ScopedTypeVariables,
     StandaloneDeriving,
     ConstraintKinds,
-    RankNTypes
+    RankNTypes,
+    DefaultSignatures
 
   build-depends:
     async,

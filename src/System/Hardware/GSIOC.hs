@@ -1,10 +1,11 @@
+{-# LANGUAGE DataKinds #-}
+
 module System.Hardware.GSIOC
     ( GSIOC
     , Byte.RawEnv(..)
     , ImmediateDecode(..)
     , BusHandle
     , mkGsiocProtocol
-    , atomic
     , openBus
     , openBus'
     , closeBus
@@ -19,7 +20,6 @@ where
 
 -- base
 import Control.Concurrent
--- import Control.Concurrent.MVar
 
 import Control.Exception ( throw )
 
@@ -41,15 +41,17 @@ import Control.Concurrent.STM.TVar
 import Control.Monad.STM
 
 -- transformers
-import Control.Concurrent.Utils
+import Control.Monad.Trans.Class
+import Control.Monad.Trans.Reader
 import Control.Monad.IO.Class
 
 -- internal
+import Control.Concurrent.Utils
 import Control.Monad.Action
+import Control.Monad.Injectable
+--import Control.Monad.Accum
 
--- import System.Hardware.GSIOC.Raw ( GsiocID, gsiocOverSerialSettings )
 import qualified System.Hardware.GSIOC.Raw as Byte
--- import System.Hardware.GSIOC.Raw hiding ( immediate', buffered' )
 
 -- data CollisionIdMod = Replace | Error
 --     deriving (Show, Typeable)
@@ -63,7 +65,12 @@ data BusHandleClosed = BusHandleClosed
 instance Exception CancelTransaction
 instance Exception BusHandleClosed
 
-data GSIOC = GSIOC
+newtype GSIOC m a = GSIOC { unGSIOC :: ReaderT GSIOC' m a }
+    deriving (Functor, Applicative, Monad, MonadIO, MonadThrow, MonadCatch, MonadMask, MonadTrans, Injectable)
+
+--deriving instance MonadAccum w m => MonadAccum w (GSIOC m)
+
+data GSIOC' = GSIOC'
     { gsiocDeviceId       :: (Word8, BusHandle)
     , gsiocCommit         :: forall a. BusHandle -> Word8 -> Byte.Raw a -> IO a
     , gsiocPollingOutrage :: Integer
@@ -85,14 +92,14 @@ type Responce a = MVar (Either SomeException a)
 
 data Cmd = forall a . Cmd (Byte.Raw a) (Responce a)
 
-mkGsiocProtocol :: BusHandle -> Word8 -> IO GSIOC
+mkGsiocProtocol :: BusHandle -> Word8 -> IO (ProtocolConstr GSIOC)
 mkGsiocProtocol bus gilsonID =
     -- liftIO $ do
     -- state <- readIORef (busState bus)
     -- when (gilsonID `elem` gsiocBusAllocated state) $ error (show gilsonID ++ " already allocated")
     -- atomicWriteIORef ref (state { gsiocBusAllocated = gilsonID:gsiocBusAllocated state })
     -- putMVar mvar currentId
-    return GSIOC
+    return $ ProtocolConstr $ \m -> runReaderT (unGSIOC m) $ GSIOC'
         { gsiocDeviceId       = (gilsonID, bus)
         , gsiocCommit         = commit
         , gsiocPollingOutrage = 500 ms
@@ -158,30 +165,30 @@ atomicCommit bus id' act = do
     writeChan (cmdPipeLine bus) (id', Cmd act var)
     (either throw id <$> takeMVar var) `onException` void (tryPutMVar var (Left (SomeException Cancel)))
 
-instance (MonadUnderA m, Proto dev ~ GSIOC) => Byte.MonadGSIOC (Action dev eff m) where
+instance (MonadUnderA m, Protocol dev ~ GSIOC) => Byte.MonadGSIOC (Action dev eff s m) where
     immediate = immediate'
     buffered  = buffered'
 
-atomic :: (MonadUnderA m, Proto dev ~ GSIOC) => Action dev eff m a -> Action dev eff m a
-atomic act = do
-    (id', bus) <- protocol gsiocDeviceId
-    let lock = liftIO $ atomically $ do
-            ids <- readTVar (lockedIds bus)
-            guard (id' `notElem` ids)
-            writeTVar (lockedIds bus) (id' : ids)
-        unlock = liftIO $ atomically $ modifyTVar' (lockedIds bus) (delete id')
-    bracket_ lock unlock $ localProtocol (\p -> p { gsiocCommit = atomicCommit }) act
+--atomic :: (MonadUnderA m, Protocol dev ~ GSIOC) => Action dev eff s m a -> Action dev eff s m a
+--atomic act = do
+--    (id', bus) <- liftP gsiocDeviceId
+--    let lock = liftIO $ atomically $ do
+--            ids <- readTVar (lockedIds bus)
+--            guard (id' `notElem` ids)
+--            writeTVar (lockedIds bus) (id' : ids)
+--        unlock = liftIO $ atomically $ modifyTVar' (lockedIds bus) (delete id')
+--    bracket_ lock unlock $ liftP $ GSIOC $ local (\p -> p { gsiocCommit = atomicCommit }) $ unGSIOC act
 
-immediate' :: (MonadUnderA m, Proto dev ~ GSIOC) => Char -> Action dev eff m String
+immediate' :: (MonadUnderA m, Protocol dev ~ GSIOC) => Char -> Action dev eff s m String
 immediate' c = do
-    (id', bus) <- protocol gsiocDeviceId
-    lcommit    <- protocol gsiocCommit
+    (id', bus) <- liftP $ GSIOC $ asks gsiocDeviceId
+    lcommit    <- liftP $ GSIOC $ asks gsiocCommit
     liftIO $ lcommit bus id' (Byte.immediate c)
 
-buffered' :: (MonadUnderA m, Proto dev ~ GSIOC) => String -> Action dev eff m ()
+buffered' :: (MonadUnderA m, Protocol dev ~ GSIOC) => String -> Action dev eff s m ()
 buffered' cmd = do
-    (id', bus) <- protocol gsiocDeviceId
-    lcommit    <- protocol gsiocCommit
+    (id', bus) <- liftP $ GSIOC $ asks gsiocDeviceId
+    lcommit    <- liftP $ GSIOC $ asks gsiocCommit
     liftIO $ lcommit bus id' (Byte.buffered cmd)
 
 data ImmediateDecode
@@ -190,18 +197,18 @@ data ImmediateDecode
 
 instance Exception ImmediateDecode
 
-immediateDecodeError :: (MonadUnderA m, Typeable dev, Proto dev ~ GSIOC) => Char -> String -> String -> Action dev eff m a
+immediateDecodeError :: (MonadUnderA m, Typeable dev, Protocol dev ~ GSIOC) => Char -> String -> String -> Action dev ('R eff 'True) s m a
 immediateDecodeError cmd responce vars = withDevice $ \dev -> throwM $ ImmediateDecode (typeOf1 dev) cmd responce vars
 
-immediateEnum :: (MonadUnderA m, Typeable dev, Proto dev ~ GSIOC) => Char -> [(String, a)] -> Action dev eff m a
+immediateEnum :: (MonadUnderA m, Typeable dev, Protocol dev ~ GSIOC) => Char -> [(String, a)] -> Action dev ('R eff 'True) s m a
 immediateEnum c dict = Byte.immediate c >>= decodeImmediate c dict
 
-decodeImmediate :: (MonadUnderA m, Typeable dev, Proto dev ~ GSIOC) => Char -> [(String, a)] -> String -> Action dev eff m a
+decodeImmediate :: (MonadUnderA m, Typeable dev, Protocol dev ~ GSIOC) => Char -> [(String, a)] -> String -> Action dev ('R eff 'True) s m a
 decodeImmediate req dict var
     | Just v <- lookup var dict = return v
     | otherwise                 = immediateDecodeError req var (show $ map fst dict)
 
-guardImmediate :: (MonadUnderA m, Typeable dev, Proto dev ~ GSIOC) => Char -> [String] -> String -> Action dev eff m ()
+guardImmediate :: (MonadUnderA m, Typeable dev, Protocol dev ~ GSIOC) => Char -> [String] -> String -> Action dev ('R eff 'True) s m ()
 guardImmediate req vars var
     | var `notElem` vars = immediateDecodeError req var (show vars)
     | otherwise  = return ()

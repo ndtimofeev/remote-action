@@ -1,3 +1,5 @@
+{-# LANGUAGE DataKinds #-}
+
 module Data.Property
 (
     -- * Exceptions
@@ -102,18 +104,18 @@ data TransitionId dev s f a = TransitionId
     , transitionFinalizer   :: TVar (Maybe (TransitionFinalizer dev s)) }
     deriving (Eq, Typeable)
 
-data TransitionFinalizer dev s = TransitionFinalizer { runTransitionFinalizer :: forall eff m. MonadUnderA m => Action dev (Impure eff) m () }
+data TransitionFinalizer dev s = TransitionFinalizer { runTransitionFinalizer :: forall m. (MonadUnderA (Protocol dev m), MonadUnderA m) => Action dev Impure s m () }
 
 transitionStatusEvent :: TransitionId dev s f a -> STM (Either (f a, STM Bool) (Maybe (f a, Maybe TransitionFail)))
 transitionStatusEvent = readTVar . transitionStatus
 
 data PropertyConf dev s f a = PropertyConf
-    { mkPropertyGetter            :: forall eff m. (IfImpure eff, MonadUnderA m) => Property dev s f a -> Action dev eff m (f a)
-    , mkPropertyWaiter            :: forall eff m. (IfImpure eff, MonadUnderA m) => Property dev s f a -> Action dev eff m (f a)
-    , mkPropertyMutator           :: forall inner eff m. (StateMap f a, MonadUnderA inner, InScope m (Action dev (Impure eff) inner), MonadUnderA m) => Property dev s f a -> a -> Action dev (Impure eff) m ()
-    , mkPropertyMissTargetHandler :: forall eff m. (StateMap f a, MonadUnderA m) => Property dev s f a -> Action dev (Impure eff) m ()
-    , mkPropertyTimeoutHandler    :: forall eff m. (StateMap f a, MonadUnderA m) => Property dev s f a -> Action dev (Impure eff) m ()
-    , mkPropertyFailStateHandler  :: forall eff m. (StateMap f a, MonadUnderA m) => Property dev s f a -> Action dev (Impure eff) m ()
+    { mkPropertyGetter            :: forall eff m. (IfImpure ('R eff 'True), MonadAction dev m) => Property dev s f a -> Action dev ('R eff 'True) s m (f a)
+    , mkPropertyWaiter            :: forall eff m. (IfImpure ('R eff 'True), MonadAction dev m) => Property dev s f a -> Action dev ('R eff 'True) s m (f a)
+    , mkPropertyMutator           :: forall inner m. (StateMap f a, MonadAction dev inner, InScope m (Action dev Impure s inner), MonadAction dev m) => Property dev s f a -> a -> Action dev Impure s m ()
+    , mkPropertyMissTargetHandler :: forall m. (StateMap f a, MonadAction dev m) => Property dev s f a -> Action dev Impure s m ()
+    , mkPropertyTimeoutHandler    :: forall m. (StateMap f a, MonadAction dev m) => Property dev s f a -> Action dev Impure s m ()
+    , mkPropertyFailStateHandler  :: forall m. (StateMap f a, MonadAction dev m) => Property dev s f a -> Action dev Impure s m ()
     }
 
 defaultPropertyConf :: PropertyConf dev s f a
@@ -142,16 +144,16 @@ data Property dev s f a = Property
     , propertyTransId           :: TVar (Maybe (TransitionId dev s f a))
     , propertyValueStream       :: TChan (f a)
 
-    , requestStatus             :: forall m eff. (IfImpure eff, MonadUnderA m) => Action dev eff m (f a)
-    , propertyAwait             :: forall m eff. (IfImpure eff, MonadUnderA m) => Action dev eff m (f a)
-    , propertyMutator           :: forall m inner eff. (StateMap f a, MonadUnderA inner, InScope m (Action dev (Impure eff) inner), MonadUnderA m) => a -> Action dev (Impure eff) m ()
+    , requestStatus             :: forall m eff. (IfImpure ('R eff 'True), MonadAction dev m) => Action dev ('R eff 'True) s m (f a)
+    , propertyAwait             :: forall m eff. (IfImpure ('R eff 'True), MonadAction dev m) => Action dev ('R eff 'True) s m (f a)
+    , propertyMutator           :: forall m inner. (StateMap f a, MonadAction dev inner, InScope m (Action dev Impure s inner), MonadAction dev m) => a -> Action dev Impure s m ()
 
-    , propertyMissTargetHandler :: forall m eff. (StateMap f a, MonadUnderA m) => Action dev (Impure eff) m ()
-    , propertyTimeoutHandler    :: forall m eff. (StateMap f a, MonadUnderA m) => Action dev (Impure eff) m ()
-    , propertyFaileStateHandler :: forall m eff. (StateMap f a, MonadUnderA m) => Action dev (Impure eff) m () }
+    , propertyMissTargetHandler :: forall m. (StateMap f a, MonadAction dev m) => Action dev Impure s m ()
+    , propertyTimeoutHandler    :: forall m. (StateMap f a, MonadAction dev m) => Action dev Impure s m ()
+    , propertyFaileStateHandler :: forall m. (StateMap f a, MonadAction dev m) => Action dev Impure s m () }
     deriving Typeable
 
-newProperty :: (StateMap f a, MonadIO m) => PropertyMeta a -> PropertyConf dev s f a -> Action (New dev) Create m (Property dev s f a)
+newProperty :: (StateMap f a, TransMult MonadIO (Protocol dev) m) => PropertyMeta a -> PropertyConf dev s f a -> Action dev Create s m (Property dev s f a)
 newProperty meta conf = liftIO $ do
     cache     <- newTVarIO Nothing
     trId      <- newTVarIO Nothing
@@ -196,7 +198,7 @@ cacheInvalidateSTM prop = do
 
 
 -- | Get property status from valid cache or request it from device
-askStatus :: (IfImpure eff, MonadUnderA m) => Property dev s f a -> Action dev eff m (f a)
+askStatus :: (IfImpure ('R eff 'True), MonadAction dev m) => Property dev s f a -> Action dev ('R eff 'True) s m (f a)
 askStatus prop =
     liftIO (atomically $ cacheState prop) >>= maybe (requestStatus prop) return
 
@@ -278,11 +280,11 @@ data WhyNotStart
     | ValidatorFail String
     deriving (Eq, Show, Typeable)
 
-mkTransition :: (StateMap f a, MonadUnderA n, InScope m (Action dev (Impure eff) n), MonadUnderA m)
+mkTransition :: (StateMap f a, MonadTrans (Protocol dev), MonadAction dev n, InScope m (Action dev Impure s n), MonadAction dev IO, MonadAction dev m)
     => Property dev s f a -- ^
     -> Maybe a -- ^ Optional transition target
-    -> Action dev (Impure eff) m b -- ^ Transition body
-    -> Action dev (Impure eff) m (Either WhyNotStart b)
+    -> Action dev Impure s m b -- ^ Transition body
+    -> Action dev Impure s m (Either WhyNotStart b)
 mkTransition prop mtarget action = runExceptT $ do
     mtrid    <- liftIO $ readTVarIO $ propertyTransId prop
     forM_ mtrid $ \_ -> throwM InappropriateStateForStart
@@ -318,7 +320,7 @@ data OutScopeTracking = OutScopeTracking String
 
 instance Exception OutScopeTracking
 
-subscribeStatus :: (IfImpure eff, StateMap f a, MonadUnderA m) => Property dev s f a -> (STM (f a) -> Action dev eff m b) -> Action dev eff m b
+subscribeStatus :: (IfImpure ('R eff 'True), StateMap f a, MonadAction dev m) => Property dev s f a -> (STM (f a) -> Action dev ('R eff 'True) s m b) -> Action dev ('R eff 'True) s m b
 subscribeStatus prop action = bracket
     (do
         st   <- askStatus prop
@@ -336,7 +338,7 @@ subscribeStatus prop action = bracket
     (\(_, chan) -> action (readTChan chan))
 
 
-subscribeTransition :: (IfImpure eff, StateMap f a, MonadUnderA m) => Property dev s f a -> TransitionId dev s f a -> (STM (f a) -> Action dev eff m b) -> Action dev eff m b
+subscribeTransition :: (IfImpure ('R eff 'True), StateMap f a, MonadAction dev IO, MonadAction dev m) => Property dev s f a -> TransitionId dev s f a -> (STM (f a) -> Action dev ('R eff 'True) s m b) -> Action dev ('R eff 'True) s m b
 subscribeTransition prop transition action = bracket
     (do
         st   <- askStatus prop
@@ -384,7 +386,7 @@ transitionCompleted transition = do
         _                      -> return Nothing
 
 
-transitionStartAwait :: (IfImpure eff, StateMap f a, MonadUnderA m) => Property dev s f a -> TransitionId dev s f a -> Action dev eff m Bool
+transitionStartAwait :: (IfImpure ('R eff 'True), StateMap f a, MonadAction dev m) => Property dev s f a -> TransitionId dev s f a -> Action dev ('R eff 'True) s m Bool
 transitionStartAwait prop transition = do
     mval <- liftIO $ atomically $ transitionStarted transition
     c    <- case mval of
@@ -401,7 +403,7 @@ transitionStartAwait prop transition = do
     return c
 
 
-transitionEndAwait :: (IfImpure eff, StateMap f a, MonadUnderA m) => Property dev s f a -> TransitionId dev s f a -> Action dev eff m (Maybe TransitionFail)
+transitionEndAwait :: (IfImpure ('R eff 'True), StateMap f a, MonadAction dev m) => Property dev s f a -> TransitionId dev s f a -> Action dev ('R eff 'True) s m (Maybe TransitionFail)
 transitionEndAwait prop transition = do
     mval <- liftIO $ atomically $ transitionCompleted transition
     merr <- case mval of
@@ -438,7 +440,7 @@ transitionEndAwait prop transition = do
 -- > writeProperty prop val2
 --
 -- transite 'prop' first to 'val1', then to 'val2'.
-writeProperty :: (StateMap f a, MonadUnderA inner, InScope m (Action dev (Impure eff) inner), MonadUnderA m) => Property dev s f a -> a -> Action dev (Impure eff) m ()
+writeProperty :: (StateMap f a, MonadAction dev inner, InScope m (Action dev Impure s inner), MonadAction dev IO, MonadAction dev m) => Property dev s f a -> a -> Action dev Impure s m ()
 writeProperty prop val = do
     mtransition <- liftIO $ atomically $ transitionState prop
     forM_ mtransition $ \transition ->
@@ -452,7 +454,7 @@ writeProperty prop val = do
 -- > x <- readProperty prop
 --
 -- 'x' == 'val'
-readProperty :: (IfImpure eff, StateMap f a, MonadUnderA m) => Property dev s f a -> Action dev eff m a
+readProperty :: (IfImpure ('R eff 'True), StateMap f a, MonadAction dev m, MonadAction dev IO) => Property dev s f a -> Action dev ('R eff 'True) s m a
 readProperty prop = do
     res <- liftIO $ atomically $ (,) <$> transitionState prop <*> cacheState prop
     val <- case res of
@@ -467,7 +469,7 @@ readProperty prop = do
     maybe (throwM MissTarget) return (completeState val)
 
 
-trackProperty :: (Typeable dev, MonadUnderA m, IfImpure eff, StateMap f b) => Property dev s f b -> (f b -> Action dev eff m ()) -> Action dev eff m ()
+trackProperty :: (Typeable dev, MonadAction dev IO, MonadAction dev m, IfImpure ('R eff 'True), StateMap f b) => Property dev s f b -> (f b -> Action dev ('R eff 'True) s m ()) -> Action dev ('R eff 'True) s m ()
 trackProperty prop act = do
     stat <- askStatus prop
     act stat

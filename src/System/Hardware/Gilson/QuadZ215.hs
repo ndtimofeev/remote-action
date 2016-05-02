@@ -1,3 +1,5 @@
+{-# LANGUAGE DataKinds #-}
+
 module System.Hardware.Gilson.QuadZ215 where
 
 -- base
@@ -57,12 +59,12 @@ rangeValidate minVal maxVal val
 
 data Output s = Output
     { output :: Property Output s Maybe Bool
-    , pulse  :: forall m. MonadUnderA m => Word8 -> Action Output (Impure s) m () }
+    , pulse  :: forall m. MonadUnderA m => Word8 -> Action Output Impure s m () }
     deriving Typeable
 
-type instance Proto Output = GSIOC
+type instance Protocol Output = GSIOC
 -- type instance Proto Probe  = GSIOC
-type instance Proto QuadZ  = GSIOC
+type instance Protocol QuadZ  = GSIOC
 
 data Probe dev s = Probe
     { zAxisPosition    :: Property dev s Position Deci
@@ -74,7 +76,7 @@ data QuadZ s = QuadZ
     { xyAxisPosition   :: Property QuadZ s Position (Deci, Deci)
     , probeWidth       :: Property QuadZ s Position Deci
     , quadZWorkspace   :: (Range Deci, Range Deci, Range Deci)
-    , handToHome       :: forall m eff inner. (MonadUnderA inner, InScope m (Action QuadZ (Impure eff) inner), MonadUnderA m) => Action QuadZ (Impure eff) m ()
+    , handToHome       :: forall m inner. (MonadUnderA inner, InScope m (Action QuadZ Impure s inner), MonadUnderA m) => Action QuadZ Impure s m ()
     , probes           :: Probes (Probe QuadZ s) }
     deriving Typeable
 
@@ -133,11 +135,11 @@ instance (Typeable a, Eq a) => StateMap Position a where
         Somewhere -> Fail
         _         -> RemoteDriven
 
-currentTransitionTarget :: MonadUnderA m => Property dev s f a -> Action dev eff m (Maybe a)
+currentTransitionTarget :: MonadAction dev m => Property dev s f a -> Action dev eff s m (Maybe a)
 currentTransitionTarget prop =
     liftIO $ atomically $ runMaybeT $ MaybeT (transitionState prop) >>= MaybeT . return . transitionTo
 
-transPitchStatus :: MonadUnderA m => Property QuadZ s Position Deci -> Action QuadZ eff m (Position Deci)
+transPitchStatus :: MonadUnderA m => Property QuadZ s Position Deci -> Action QuadZ ('R eff 'True) s m (Position Deci)
 transPitchStatus prop = do
     mtarget <- currentTransitionTarget prop
     case mtarget of
@@ -150,7 +152,7 @@ transPitchStatus prop = do
                     Just val | n > 0 , failCond val target -> go (n - 1)
                     _                                      -> return stat
 
-pitchStatus :: MonadUnderA m => Action QuadZ eff m (Position Deci)
+pitchStatus :: MonadUnderA m => Action QuadZ ('R eff 'True) s m (Position Deci)
 pitchStatus = do
     digest <- motorStatus
     mpos   <- readMaybe <$> immediate 'w'
@@ -161,7 +163,7 @@ pitchStatus = do
         _                               -> Homeing
 
 
-qzPosition :: (IfImpure eff, MonadUnderA m) => Property QuadZ s f a -> Action QuadZ eff m (Position (Deci, Deci))
+qzPosition :: (IfImpure ('R eff 'True), MonadUnderA m) => Property QuadZ s f a -> Action QuadZ ('R eff 'True) s m (Position (Deci, Deci))
 qzPosition _ = do
     digest <- motorStatus
     let xyMotor = xMotor digest <> yMotor digest <> pitchMotor digest
@@ -209,7 +211,7 @@ instance Monoid MotorStatus where
     mappend l r = fromMaybe MotorPowered $ msum $
         (\v -> guard (v == l || v == r) >> pure v) <$> [MotorError, MotorNotInit, MotorUnpowered,MotorRunning]
 
-immediateParsec :: (Typeable dev, MonadUnderA m, Proto dev ~ GSIOC) => Char -> Parser a -> Action dev eff m a
+immediateParsec :: (Typeable dev, MonadUnderA m, Protocol dev ~ GSIOC) => Char -> Parser a -> Action dev ('R eff 'True) s m a
 immediateParsec cmd parser = do
     str <- immediate cmd
     case parse parser str str of
@@ -217,11 +219,11 @@ immediateParsec cmd parser = do
         Left err -> immediateDecodeError cmd str (intercalate "; " $ messageString <$> errorMessages err)
 
 
-zPosition :: (Typeable dev, Proto dev ~ GSIOC, MonadUnderA m) => Action dev eff m (Probes (Maybe Deci))
+zPosition :: MonadUnderA m => Action QuadZ ('R eff 'True) s m (Probes (Maybe Deci))
 zPosition = immediateParsec 'Z' $ Probes
     <$> value 4 <*> (char ',' >> value 4) <*> (char ',' >> value 4) <*> (char ',' >> value 4)
 
-probeStatus :: MonadUnderA m => (forall a. Probes a -> a) -> Action QuadZ eff m (Position Deci)
+probeStatus :: MonadUnderA m => (forall a. Probes a -> a) -> Action QuadZ ('R eff 'True) s m (Position Deci)
 probeStatus selector = do
     motor <- (selector . probesMotor) <$> motorStatus
     if motor `notElem` [MotorRunning, MotorPowered]
@@ -235,7 +237,7 @@ probeStatus selector = do
                 Nothing                     -> Homeing
 
 
-motorStatus :: (Typeable dev, MonadUnderA m, Nominal dev ~ QuadZ, Proto dev ~ GSIOC) => Action dev eff m (MotorDigest MotorStatus)
+motorStatus :: MonadUnderA m => Action QuadZ ('R eff 'True) s m (MotorDigest MotorStatus)
 motorStatus = immediateParsec 'm' $ (\xM yM aM bM cM dM pM -> MotorDigest xM yM (Probes aM bM cM dM) pM)
     <$> parseStatus <*> parseStatus <*> parseStatus <*> parseStatus <*> parseStatus <*> parseStatus <*> parseStatus
     where
@@ -247,11 +249,11 @@ motorStatus = immediateParsec 'm' $ (\xM yM aM bM cM dM pM -> MotorDigest xM yM 
             <|> (char 'I' $> MotorNotInit)
 
 data GsiocPropertyConf dev s f a = GsiocPropertyConf
-    { mkGsiocGetter            :: forall eff m. (IfImpure eff, MonadUnderA m) => Property dev s f a -> Action dev eff m (f a)
-    , mkGsiocMutator           :: forall inner eff m. (StateMap f a, MonadUnderA inner, InScope m (Action dev (Impure eff) inner), MonadUnderA m) => Property dev s f a -> a -> Action dev (Impure eff) m ()
-    , mkGsiocMissTargetHandler :: forall eff m. (StateMap f a, MonadUnderA m) => Property dev s f a -> Action dev (Impure eff) m ()
-    , mkGsiocTimeoutHandler    :: forall eff m. (StateMap f a, MonadUnderA m) => Property dev s f a -> Action dev (Impure eff) m ()
-    , mkGsiocFailStateHandler  :: forall eff m. (StateMap f a, MonadUnderA m) => Property dev s f a -> Action dev (Impure eff) m ()
+    { mkGsiocGetter            :: forall eff m. (IfImpure ('R eff 'True), MonadAction dev m) => Property dev s f a -> Action dev ('R eff 'True) s m (f a)
+    , mkGsiocMutator           :: forall inner m. (StateMap f a, MonadAction dev inner, InScope m (Action dev Impure s inner), MonadAction dev m) => Property dev s f a -> a -> Action dev Impure s m ()
+    , mkGsiocMissTargetHandler :: forall m. (StateMap f a, MonadAction dev m) => Property dev s f a -> Action dev Impure s m ()
+    , mkGsiocTimeoutHandler    :: forall m. (StateMap f a, MonadAction dev m) => Property dev s f a -> Action dev Impure s m ()
+    , mkGsiocFailStateHandler  :: forall m. (StateMap f a, MonadAction dev m) => Property dev s f a -> Action dev Impure s m ()
     }
 
 gsiocPropertyConf :: GsiocPropertyConf dev s f a
@@ -264,10 +266,10 @@ gsiocPropertyConf = GsiocPropertyConf
     }
 
 newGsiocVariable
-    :: (Typeable dev, Typeable f, Typeable a, MonadUnderA m, MonadAccum (CreateCtx d (Action dev Create IO)) m, StateMap f a)
+    :: (Protocol dev ~ GSIOC, Typeable dev, Typeable f, Typeable a, MonadUnderA m, MonadAccum (CreateCtx d dev s IO) m, StateMap f a)
     => PropertyMeta a
     -> GsiocPropertyConf dev s f a
-    -> Action (New dev) Create m (Property dev s f a)
+    -> Action dev Create s m (Property dev s f a)
 newGsiocVariable meta conf = do
     var  <- liftIO $ newTVarIO (const False)
     prop <- newProperty meta PropertyConf
@@ -288,7 +290,7 @@ newGsiocVariable meta conf = do
     return prop
 
 
-mkQZ :: (Range Deci, Range Deci, Range Deci) -> CreateAction QuadZ (QuadZ ())
+mkQZ :: (MonadUnderA m, MonadAccum (CreateCtx d QuadZ s IO) m) => ((Deci, Deci), (Deci, Deci), (Deci, Deci)) -> Action QuadZ Create s m (QuadZ s)
 mkQZ box@(xRng, yRng, zRng) = do
     let positionValidate v@(x, y)
             | x < fst xRng || x > snd xRng = Left ("X out of range " ++ show xRng)
