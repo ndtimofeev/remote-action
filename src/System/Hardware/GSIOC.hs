@@ -26,7 +26,6 @@ import Control.Exception ( throw )
 import Control.Monad
 
 import Data.Word
-import Data.List
 import Data.IORef
 import Data.Typeable
 
@@ -99,7 +98,7 @@ mkGsiocProtocol bus gilsonID =
     -- when (gilsonID `elem` gsiocBusAllocated state) $ error (show gilsonID ++ " already allocated")
     -- atomicWriteIORef ref (state { gsiocBusAllocated = gilsonID:gsiocBusAllocated state })
     -- putMVar mvar currentId
-    return $ ProtocolConstr $ \m -> runReaderT (unGSIOC m) $ GSIOC'
+    return $ ProtocolConstr $ \mexpr -> runReaderT (unGSIOC mexpr) $ GSIOC'
         { gsiocDeviceId       = (gilsonID, bus)
         , gsiocCommit         = commit
         , gsiocPollingOutrage = 500 ms
@@ -197,18 +196,20 @@ data ImmediateDecode
 
 instance Exception ImmediateDecode
 
-immediateDecodeError :: (MonadUnderA m, Typeable dev, Protocol dev ~ GSIOC) => Char -> String -> String -> Action dev ('R eff 'True) s m a
-immediateDecodeError cmd responce vars = withDevice $ \dev -> throwM $ ImmediateDecode (typeOf1 dev) cmd responce vars
+immediateDecodeError :: (MonadUnderA m, Typeable dev, Protocol dev ~ GSIOC) => Char -> String -> String -> Action dev eff s m a
+immediateDecodeError cmd responce vars = do
+    trep <- devTypeRep
+    throwM $ ImmediateDecode trep cmd responce vars
 
-immediateEnum :: (MonadUnderA m, Typeable dev, Protocol dev ~ GSIOC) => Char -> [(String, a)] -> Action dev ('R eff 'True) s m a
+immediateEnum :: (MonadUnderA m, Typeable dev, Protocol dev ~ GSIOC) => Char -> [(String, a)] -> Action dev eff s m a
 immediateEnum c dict = Byte.immediate c >>= decodeImmediate c dict
 
-decodeImmediate :: (MonadUnderA m, Typeable dev, Protocol dev ~ GSIOC) => Char -> [(String, a)] -> String -> Action dev ('R eff 'True) s m a
+decodeImmediate :: (MonadUnderA m, Typeable dev, Protocol dev ~ GSIOC) => Char -> [(String, a)] -> String -> Action dev eff s m a
 decodeImmediate req dict var
     | Just v <- lookup var dict = return v
     | otherwise                 = immediateDecodeError req var (show $ map fst dict)
 
-guardImmediate :: (MonadUnderA m, Typeable dev, Protocol dev ~ GSIOC) => Char -> [String] -> String -> Action dev ('R eff 'True) s m ()
+guardImmediate :: (MonadUnderA m, Typeable dev, Protocol dev ~ GSIOC) => Char -> [String] -> String -> Action dev eff s m ()
 guardImmediate req vars var
     | var `notElem` vars = immediateDecodeError req var (show vars)
     | otherwise  = return ()

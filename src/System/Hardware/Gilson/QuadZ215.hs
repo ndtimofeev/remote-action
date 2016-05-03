@@ -75,7 +75,7 @@ data Probe dev s = Probe
 data QuadZ s = QuadZ
     { xyAxisPosition   :: Property QuadZ s Position (Deci, Deci)
     , probeWidth       :: Property QuadZ s Position Deci
-    , quadZWorkspace   :: (Range Deci, Range Deci, Range Deci)
+    , quadZWorkspaces  :: Probes (Range Deci, Range Deci, Range Deci)
     , handToHome       :: forall m inner. (MonadUnderA inner, InScope m (Action QuadZ Impure s inner), MonadUnderA m) => Action QuadZ Impure s m ()
     , probes           :: Probes (Probe QuadZ s) }
     deriving Typeable
@@ -139,7 +139,7 @@ currentTransitionTarget :: MonadAction dev m => Property dev s f a -> Action dev
 currentTransitionTarget prop =
     liftIO $ atomically $ runMaybeT $ MaybeT (transitionState prop) >>= MaybeT . return . transitionTo
 
-transPitchStatus :: MonadUnderA m => Property QuadZ s Position Deci -> Action QuadZ ('R eff 'True) s m (Position Deci)
+transPitchStatus :: MonadUnderA m => Property QuadZ s Position Deci -> Action QuadZ eff s m (Position Deci)
 transPitchStatus prop = do
     mtarget <- currentTransitionTarget prop
     case mtarget of
@@ -152,7 +152,7 @@ transPitchStatus prop = do
                     Just val | n > 0 , failCond val target -> go (n - 1)
                     _                                      -> return stat
 
-pitchStatus :: MonadUnderA m => Action QuadZ ('R eff 'True) s m (Position Deci)
+pitchStatus :: MonadUnderA m => Action QuadZ eff s m (Position Deci)
 pitchStatus = do
     digest <- motorStatus
     mpos   <- readMaybe <$> immediate 'w'
@@ -211,7 +211,7 @@ instance Monoid MotorStatus where
     mappend l r = fromMaybe MotorPowered $ msum $
         (\v -> guard (v == l || v == r) >> pure v) <$> [MotorError, MotorNotInit, MotorUnpowered,MotorRunning]
 
-immediateParsec :: (Typeable dev, MonadUnderA m, Protocol dev ~ GSIOC) => Char -> Parser a -> Action dev ('R eff 'True) s m a
+immediateParsec :: (Typeable dev, MonadUnderA m, Protocol dev ~ GSIOC) => Char -> Parser a -> Action dev eff s m a
 immediateParsec cmd parser = do
     str <- immediate cmd
     case parse parser str str of
@@ -219,11 +219,11 @@ immediateParsec cmd parser = do
         Left err -> immediateDecodeError cmd str (intercalate "; " $ messageString <$> errorMessages err)
 
 
-zPosition :: MonadUnderA m => Action QuadZ ('R eff 'True) s m (Probes (Maybe Deci))
+zPosition :: MonadUnderA m => Action QuadZ eff s m (Probes (Maybe Deci))
 zPosition = immediateParsec 'Z' $ Probes
     <$> value 4 <*> (char ',' >> value 4) <*> (char ',' >> value 4) <*> (char ',' >> value 4)
 
-probeStatus :: MonadUnderA m => (forall a. Probes a -> a) -> Action QuadZ ('R eff 'True) s m (Position Deci)
+probeStatus :: MonadUnderA m => (forall a. Probes a -> a) -> Action QuadZ eff s m (Position Deci)
 probeStatus selector = do
     motor <- (selector . probesMotor) <$> motorStatus
     if motor `notElem` [MotorRunning, MotorPowered]
@@ -237,7 +237,7 @@ probeStatus selector = do
                 Nothing                     -> Homeing
 
 
-motorStatus :: MonadUnderA m => Action QuadZ ('R eff 'True) s m (MotorDigest MotorStatus)
+motorStatus :: MonadUnderA m => Action QuadZ eff s m (MotorDigest MotorStatus)
 motorStatus = immediateParsec 'm' $ (\xM yM aM bM cM dM pM -> MotorDigest xM yM (Probes aM bM cM dM) pM)
     <$> parseStatus <*> parseStatus <*> parseStatus <*> parseStatus <*> parseStatus <*> parseStatus <*> parseStatus
     where
@@ -290,7 +290,7 @@ newGsiocVariable meta conf = do
     return prop
 
 
-mkQZ :: (MonadUnderA m, MonadAccum (CreateCtx d QuadZ s IO) m) => ((Deci, Deci), (Deci, Deci), (Deci, Deci)) -> Action QuadZ Create s m (QuadZ s)
+mkQZ :: (MonadUnderA m, MonadAccum (CreateCtx d QuadZ s IO) m) => ((Deci, Deci), (Deci, Deci), Probes (Deci, Deci)) -> Action QuadZ Create s m (QuadZ s)
 mkQZ box@(xRng, yRng, zRng) = do
     let positionValidate v@(x, y)
             | x < fst xRng || x > snd xRng = Left ("X out of range " ++ show xRng)
@@ -318,7 +318,7 @@ mkQZ box@(xRng, yRng, zRng) = do
     probesHnd <- forM (Probes (Select aProbe) (Select bProbe) (Select cProbe) (Select dProbe)) $
         \(Select selector) -> do
             zPos <- newGsiocVariable
-                (mkMeta $ "Z position " ++ [toUpper (selector probeLetter)] ++ " probe") { mkPropertyValidator = rangeValidate (fst zRng) (snd zRng) }
+                (mkMeta $ "Z position " ++ [toUpper (selector probeLetter)] ++ " probe") { mkPropertyValidator = rangeValidate (fst $ selector zRng) (snd $ selector zRng) }
                 (gsiocPropertyConf
                     { mkGsiocGetter  = \_ -> probeStatus selector
                     , mkGsiocMutator = \_ (MkFixed val) -> buffered ('Z' : selector probeLetter : show val) })
@@ -339,5 +339,5 @@ mkQZ box@(xRng, yRng, zRng) = do
             forM_ probesHnd $ \probe -> do
                 mkTransition (zAxisPosition probe) Nothing (return ())
             return ()
-        , probes         = probesHnd
-        , quadZWorkspace = box }
+        , probes          = probesHnd
+        , quadZWorkspaces = fmap (\rng -> (xRng, yRng, rng)) zRng }

@@ -31,6 +31,7 @@ module Control.Monad.Action
     , subDeviceAction
 
     -- * Device access API
+    , devTypeRep
     , withDevice
     , device
     , liftP
@@ -47,6 +48,7 @@ where
 -- base
 import Control.Concurrent
 
+import Data.Typeable
 import Data.List
 
 import GHC.Exts
@@ -168,23 +170,18 @@ runAction devHnd expr =
     in  protocolPart devHnd' $ runReaderT (unAction expr) $ MkAccuredDevice devHnd'
 
 unsafeAction :: (Monad m, DeviceHandle devHnd) => devHnd dev -> (forall s. Action dev eff s m a) -> m a
-unsafeAction devHnd expr =
-    let devHnd' = toDynamicDevice devHnd
-    in  protocolPart devHnd' $ runReaderT (unAction expr) $ MkAccuredDevice devHnd'
+unsafeAction = runAction
 
 safeAction :: Monad m => AccuredDevice s dev -> (forall t. Action dev eff t m a) -> m a
-safeAction = unsafeAction
+safeAction = runAction
 
 subDeviceAction :: (Monad m, Protocol dev ~ Protocol dev1) => SubDevice s dev -> (forall t. Action dev eff t m b) -> Action dev1 eff s m b
 subDeviceAction (SubDevice subDev) = unsafeActionMap (withReaderT (const subDev))
 
 pureAction :: (Monad m, DeviceHandle devHnd) => devHnd dev -> (forall s. Action dev Pure s m a) -> m a
-pureAction = unsafeAction
+pureAction = runAction
 
---mkDevice :: (Injectable (Protocol dev), MonadAction dev m) -- , MonadMask (Protocol dev (AccumT (CreateCtx HandleLock dev s m) m)))
---    => m (ProtocolConstr (Protocol dev)) -- ^
---    -> (forall s m1. (MonadAction dev m1, MonadAccum (CreateCtx HandleLock dev s m) m1) => Action dev Create s m1 (dev s))
---    -> m (DynamicDevice dev)
+mkDevice :: (Monad (Protocol dev m), MonadIO m, Injectable (Protocol dev)) => m (ProtocolConstr (Protocol dev)) -> (forall s. Action dev eff s (AccumT (CreateCtx HandleLock dev s m) m) (dev s)) -> m (DynamicDevice dev)
 mkDevice protocolConstr devConstr = do
     ProtocolConstr unlift    <- protocolConstr
     lock                     <- liftIO $ newTVarIO Nothing
@@ -250,6 +247,9 @@ instance Injectable (Protocol dev) => Injectable (Action dev eff s) where
 
 liftP :: Protocol dev m a -> Action dev eff s m a
 liftP = Action . ReaderT . const
+
+devTypeRep :: (Typeable dev, Monad m, Monad (Protocol dev m)) => Action dev eff s m TypeRep
+devTypeRep = Action $ asks (typeOf1 . devicePart . toDynamicDevice)
 
 withDevice :: Monad (Protocol dev m) => (dev s -> Action dev ('R r 'True) s m a) -> Action dev ('R r 'True) s m a
 withDevice act = device >>= act
