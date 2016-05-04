@@ -59,7 +59,8 @@ library
     StandaloneDeriving,
     ConstraintKinds,
     RankNTypes,
-    DefaultSignatures
+    DefaultSignatures,
+    DataKinds
 
   build-depends:
     async,

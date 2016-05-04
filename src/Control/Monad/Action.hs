@@ -3,6 +3,7 @@
 
 module Control.Monad.Action
     ( Action
+    , MixingAction(..)
     , MonadUnderA
     , MonadAction
     , Protocol
@@ -77,6 +78,16 @@ import Control.Monad.Injectable
 import Control.Monad.Regions
 
 import Data.Flist
+
+-- | Like 'Applicative', but without ('<**>') == ap
+class Applicative m => MixingAction m where
+    (<**>) :: m (a -> b) -> m a -> m b
+    (**>)  :: m a -> m b -> m b
+    lexpr **> rexpr = (lexpr *> pure id) <**> rexpr
+
+instance MixingAction m => MixingAction (ReaderT r m) where
+    rf <**> rv = ReaderT $ \r -> runReaderT rf r <**> runReaderT rv r
+    rf **> rv = ReaderT $ \r -> runReaderT rf r **> runReaderT rv r
 
 type Impure      = 'R 'True 'True
 type Pure        = 'R 'False 'True
@@ -169,7 +180,7 @@ runAction devHnd expr =
     let devHnd' = toDynamicDevice devHnd
     in  protocolPart devHnd' $ runReaderT (unAction expr) $ MkAccuredDevice devHnd'
 
-unsafeAction :: (Monad m, DeviceHandle devHnd) => devHnd dev -> (forall s. Action dev eff s m a) -> m a
+unsafeAction :: (Monad m, DeviceHandle devHnd) => devHnd dev -> (forall s. Action dev Impure s m a) -> m a
 unsafeAction = runAction
 
 safeAction :: Monad m => AccuredDevice s dev -> (forall t. Action dev eff t m a) -> m a
@@ -219,12 +230,13 @@ newtype Action (dev :: * -> *) (eff :: Restriction) (s :: *) (m :: * -> *) a = A
 unsafeActionMap :: Monad m => (ReaderT (AccuredDevice s dev) (Protocol dev m) a -> ReaderT (AccuredDevice s dev1) (Protocol dev1 m) b) -> Action dev eff s m a -> Action dev1 eff s m b
 unsafeActionMap f = Action . f . unAction
 
-deriving instance Functor (Protocol dev m)     => Functor (Action dev eff s m)
-deriving instance Applicative (Protocol dev m) => Applicative (Action dev eff s m)
-deriving instance Monad (Protocol dev m)       => Monad (Action dev eff s m)
-deriving instance MonadIO (Protocol dev m)     => MonadIO (Action dev eff s m)
-deriving instance MonadThrow (Protocol dev m)  => MonadThrow (Action dev eff s m)
-deriving instance MonadCatch (Protocol dev m)  => MonadCatch (Action dev eff s m)
+deriving instance MixingAction (Protocol dev m) => MixingAction (Action dev eff s m)
+deriving instance Functor (Protocol dev m)      => Functor (Action dev eff s m)
+deriving instance Applicative (Protocol dev m)  => Applicative (Action dev eff s m)
+deriving instance Monad (Protocol dev m)        => Monad (Action dev eff s m)
+deriving instance MonadIO (Protocol dev m)      => MonadIO (Action dev eff s m)
+deriving instance MonadThrow (Protocol dev m)   => MonadThrow (Action dev eff s m)
+deriving instance MonadCatch (Protocol dev m)   => MonadCatch (Action dev eff s m)
 
 instance (MonadTrans (Protocol dev), Monad (Protocol dev m), InScope m r) => InScope (Action dev eff s m) r
 instance (MonadTrans (Protocol dev), Monad (Protocol dev m), MonadAccum acc m) => MonadAccum acc (Action dev eff s m) where

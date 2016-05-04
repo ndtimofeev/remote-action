@@ -15,7 +15,8 @@ module System.Hardware.GSIOC
     , immediateEnum
     , Byte.gsiocOverSerialSettings
     , guardImmediate
-    , Byte.rawEnwFromHandle )
+    , Byte.rawEnwFromHandle
+    , newGsiocProperty )
 where
 
 -- base
@@ -25,6 +26,7 @@ import Control.Exception ( throw )
 
 import Control.Monad
 
+import Data.Function
 import Data.Word
 import Data.IORef
 import Data.Typeable
@@ -36,6 +38,7 @@ import Control.Monad.Catch
 
 -- stm
 import Control.Concurrent.STM.TVar
+import Control.Concurrent.STM.TMVar
 
 import Control.Monad.STM
 
@@ -48,7 +51,10 @@ import Control.Monad.IO.Class
 import Control.Concurrent.Utils
 import Control.Monad.Action
 import Control.Monad.Injectable
---import Control.Monad.Accum
+import Control.Monad.Regions
+import Control.Monad.Accum
+
+import Data.Property
 
 import qualified System.Hardware.GSIOC.Raw as Byte
 
@@ -213,3 +219,31 @@ guardImmediate :: (MonadUnderA m, Typeable dev, Protocol dev ~ GSIOC) => Char ->
 guardImmediate req vars var
     | var `notElem` vars = immediateDecodeError req var (show vars)
     | otherwise  = return ()
+
+newGsiocProperty :: (StateMap f a, MonadIO m, MonadAction dev m1, MonadAccum (CreateCtx d dev s m1) m)
+    => String -- ^ Property name
+    -> (forall m eff. (IfImpure ('R eff 'True), MonadAction dev m) => Property dev s f a -> Action dev ('R eff 'True) s m (f a))
+    -> (forall m inner. (MonadAction dev inner, InScope m (Action dev Impure s inner), MonadAction dev m) => Property dev s f a -> a -> Action dev Impure s m ())
+    -> PropertyOptional dev s f a
+    -> m (Property dev s f a)
+newGsiocProperty propertyName' requestStatus' propertyMutator' extraPart = do
+    getterVar <- liftIO newEmptyTMVarIO
+    isOldVar  <- liftIO $ newTVarIO (const False)
+    prop      <- liftIO $ newProperty
+        propertyName'
+        (\prop -> sharedEval (requestStatus' prop) getterVar)
+        (\prop -> fix $ \onemore -> do
+            val  <- requestStatus prop
+            join $ liftIO $ atomically $ do
+                cond <- readTVar isOldVar
+                if cond val
+                    then return $ do
+                        delay (100 ms)
+                        onemore
+                    else do
+                        writeTVar isOldVar (==val)
+                        return $ return val )
+        propertyMutator'
+        extraPart
+    addToStage $ void $ requestStatus prop
+    return prop

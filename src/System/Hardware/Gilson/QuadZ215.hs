@@ -184,12 +184,13 @@ qzPosition _ = do
 
 value :: Int -> Parser (Maybe Deci)
 value n = (replicateM_ n (char '?') $> Nothing) <|> (Just . MkFixed <$> number)
-    where
-        number = do
-            spaces
-            sign <- option "" $ string "-"
-            num  <- some digit
-            return $ read (sign ++ num)
+
+number :: Parser Integer
+number = do
+    spaces
+    sign <- option "" $ string "-"
+    num  <- some digit
+    return $ read (sign ++ num)
 
 data Probes a = Probes { aProbe :: a, bProbe :: a, cProbe :: a, dProbe :: a }
     deriving (Eq, Ord, Show, Typeable, Foldable, Functor, Traversable)
@@ -236,6 +237,23 @@ probeStatus selector = do
                     | otherwise             -> In pos
                 Nothing                     -> Homeing
 
+boxStatus :: MonadUnderA m => Action QuadZ eff s m (Range Deci, Range Deci, Range Deci)
+boxStatus = do
+    rs <- replicateM 3 $ immediateParsec 'Q' $ rangeParser "XYZ"
+    maybe (immediateDecodeError 'Q' (show rs) "") return $
+        (,,) <$> lookup 'X' rs <*> lookup 'Y' rs <*> lookup 'Z' rs
+
+rangeParser :: [Char] -> Parser (Char, (Deci, Deci))
+rangeParser chars = do
+    c  <- oneOf chars
+    char '='
+    spaces
+    n1 <- number
+    char '/'
+    spaces
+    n2 <- number
+    return (c, (MkFixed n1, MkFixed n2))
+
 
 motorStatus :: MonadUnderA m => Action QuadZ eff s m (MotorDigest MotorStatus)
 motorStatus = immediateParsec 'm' $ (\xM yM aM bM cM dM pM -> MotorDigest xM yM (Probes aM bM cM dM) pM)
@@ -248,47 +266,7 @@ motorStatus = immediateParsec 'm' $ (\xM yM aM bM cM dM pM -> MotorDigest xM yM 
             <|> (char 'E' $> MotorError)
             <|> (char 'I' $> MotorNotInit)
 
-data GsiocPropertyConf dev s f a = GsiocPropertyConf
-    { mkGsiocGetter            :: forall eff m. (IfImpure ('R eff 'True), MonadAction dev m) => Property dev s f a -> Action dev ('R eff 'True) s m (f a)
-    , mkGsiocMutator           :: forall inner m. (StateMap f a, MonadAction dev inner, InScope m (Action dev Impure s inner), MonadAction dev m) => Property dev s f a -> a -> Action dev Impure s m ()
-    , mkGsiocMissTargetHandler :: forall m. (StateMap f a, MonadAction dev m) => Property dev s f a -> Action dev Impure s m ()
-    , mkGsiocTimeoutHandler    :: forall m. (StateMap f a, MonadAction dev m) => Property dev s f a -> Action dev Impure s m ()
-    , mkGsiocFailStateHandler  :: forall m. (StateMap f a, MonadAction dev m) => Property dev s f a -> Action dev Impure s m ()
-    }
-
-gsiocPropertyConf :: GsiocPropertyConf dev s f a
-gsiocPropertyConf = GsiocPropertyConf
-    { mkGsiocGetter            = undefined
-    , mkGsiocMutator           = undefined
-    , mkGsiocMissTargetHandler = const $ return ()
-    , mkGsiocTimeoutHandler    = const $ return ()
-    , mkGsiocFailStateHandler  = const $ return ()
-    }
-
-newGsiocVariable
-    :: (Protocol dev ~ GSIOC, Typeable dev, Typeable f, Typeable a, MonadUnderA m, MonadAccum (CreateCtx d dev s IO) m, StateMap f a)
-    => PropertyMeta a
-    -> GsiocPropertyConf dev s f a
-    -> Action dev Create s m (Property dev s f a)
-newGsiocVariable meta conf = do
-    var  <- liftIO $ newTVarIO (const False)
-    prop <- newProperty meta PropertyConf
-        { mkPropertyGetter    = mkGsiocGetter conf
-        , mkPropertyMutator   = mkGsiocMutator conf
-        , mkPropertyWaiter    = \prop -> fix $ \onemore -> do
-            val  <- requestStatus prop
-            cond <- liftIO $ readTVarIO var
-            if cond val
-                then delay (100 ms) >> onemore
-                else do
-                    liftIO $ atomically $ writeTVar var (==val)
-                    return val
-        , mkPropertyMissTargetHandler = mkGsiocMissTargetHandler conf
-        , mkPropertyTimeoutHandler    = mkGsiocTimeoutHandler conf
-        , mkPropertyFailStateHandler  = mkGsiocFailStateHandler conf }
-    addToStage $ void $ requestStatus prop
-    return prop
-
+mkQZWithNormalBox (xRng, yRng, zRng) = mkQZ (xRng, yRng, fmap (const zRng) Probes {})
 
 mkQZ :: (MonadUnderA m, MonadAccum (CreateCtx d QuadZ s IO) m) => ((Deci, Deci), (Deci, Deci), Probes (Deci, Deci)) -> Action QuadZ Create s m (QuadZ s)
 mkQZ box@(xRng, yRng, zRng) = do
@@ -297,31 +275,40 @@ mkQZ box@(xRng, yRng, zRng) = do
             | y < fst yRng || y > snd yRng = Left ("Y out of range " ++ show yRng)
             | otherwise                    = return v
 
-    posProp   <- newGsiocVariable
-        (mkMeta "QuadZ hand position" :: PropertyMeta (Deci, Deci))
-            { mkPropertyEq        = \(x0, y0) (x1, y1) -> abs (x0 - x1) + abs (y0 - y1) <= 0.2
-            , mkPropertyValidator = positionValidate }
-        gsiocPropertyConf
-            { mkGsiocGetter  = qzPosition
-            , mkGsiocMutator = \_ (MkFixed x, MkFixed y) -> do
-                MkFixed dx <- withDevice $ readProperty . probeWidth
-                buffered ("X" ++ show (x + 180 - dx) ++ "/" ++ show y) }
+    posProp   <- newGsiocProperty "QuadZ hand position"
+        qzPosition
+        (\_ (MkFixed x, MkFixed y) -> do
+            MkFixed dx <- withDevice $ readProperty . probeWidth
+            buffered ("X" ++ show (x + 180 - dx) ++ "/" ++ show y))
+        propertyOptional
+            { mkPropertyValidator'        = positionValidate
+            , mkPropertyEq'               = \(x0, y0) (x1, y1) -> abs (x0 - x1) + abs (y0 - y1) <= 0.2
+            }
 
-    widthProp <- newGsiocVariable
-        (mkMeta  "Probe distance") { mkPropertyValidator = rangeValidate 9 18 }
-        gsiocPropertyConf
-            { mkGsiocGetter  = transPitchStatus
-            , mkGsiocMutator = \_ (MkFixed val) -> buffered ('w' : show val) }
+    widthProp <- newGsiocProperty "Probe distance"
+        transPitchStatus
+        (\_ (MkFixed val) -> buffered ('w' : show val))
+        propertyOptional { mkPropertyValidator' = rangeValidate 9 18 }
 
     let probeLetter = Probes 'a' 'b' 'c' 'd'
 
     probesHnd <- forM (Probes (Select aProbe) (Select bProbe) (Select cProbe) (Select dProbe)) $
         \(Select selector) -> do
-            zPos <- newGsiocVariable
-                (mkMeta $ "Z position " ++ [toUpper (selector probeLetter)] ++ " probe") { mkPropertyValidator = rangeValidate (fst $ selector zRng) (snd $ selector zRng) }
-                (gsiocPropertyConf
-                    { mkGsiocGetter  = \_ -> probeStatus selector
-                    , mkGsiocMutator = \_ (MkFixed val) -> buffered ('Z' : selector probeLetter : show val) })
+            zPos <- newGsiocProperty ("Z position " ++ [toUpper (selector probeLetter)] ++ " probe")
+                (\_ -> probeStatus selector)
+                (\_ (MkFixed val) -> buffered ('Z' : selector probeLetter : show val))
+                propertyOptional
+                    { mkPropertyValidator' = rangeValidate (fst $ selector zRng) (snd $ selector zRng)
+                    , mkPropertyMutationPrecheck' = \_ act -> withDevice $ \quadz -> do
+--                        probesEvs <- mapM (propertyCompleteEvent . zAxisPosition) $ probes quadz
+--                        widthEv   <- propertyCompleteEvent $ probeWidth quadz
+                        propertyCompleteEvent (xyAxisPosition quadz) act
+--                        return $ xyEv
+--                            c1 <- all id <$> sequence probesEvs
+--                            c2 <- widthEv
+--                            c3 <- xyEv
+--                            return $ c1 && c2 && c3
+                    }
             return Probe { zAxisPosition = zPos }
 
     return QuadZ
@@ -331,8 +318,12 @@ mkQZ box@(xRng, yRng, zRng) = do
         -- Здесь можно инвалидировать транзакции
             liftIO $ atomically $ do
                 cacheInvalidateSTM posProp
+                transitionInvalidateSTM posProp
                 cacheInvalidateSTM widthProp
-                forM_ probesHnd $ cacheInvalidateSTM . zAxisPosition
+                transitionInvalidateSTM posProp
+                forM_ probesHnd $ \probe -> do
+                    cacheInvalidateSTM (zAxisPosition probe)
+                    transitionInvalidateSTM (zAxisPosition probe)
             buffered "H"
             mkTransition posProp (Just (fst xRng, fst yRng)) (return ())
             mkTransition widthProp (Just 18) (return ())
