@@ -245,5 +245,6 @@ newGsiocProperty propertyName' requestStatus' propertyMutator' extraPart = do
                         return $ return val )
         propertyMutator'
         extraPart
+            { mkPropertyMutationPrecheck = \prop dev -> propertyTransitionCheck prop : mkPropertyMutationPrecheck extraPart prop dev }
     addToStage $ void $ requestStatus prop
     return prop

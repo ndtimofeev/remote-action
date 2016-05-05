@@ -4,11 +4,12 @@ module System.Hardware.Gilson.QuadZ215 where
 
 -- base
 import Control.Applicative
-import Control.Exception
+-- import Control.Exception
 import Control.Monad
 
 import Data.Char
 import Data.Fixed
+import Data.Foldable
 import Data.Functor
 import Data.Functor.Identity
 import Data.List
@@ -30,7 +31,7 @@ import Text.Parsec.Prim         ( parse )
 import Text.Parsec.String
 
 -- stm
-import Control.Concurrent.STM.TVar
+-- import Control.Concurrent.STM.TVar
 import Control.Concurrent.STM.TChan
 
 import Control.Monad.STM
@@ -43,7 +44,7 @@ import Control.Monad.IO.Class
 import Control.Monad.Reader
 
 -- internal
-import Control.Concurrent.Utils hiding ( y )
+-- import Control.Concurrent.Utils hiding ( y )
 import Control.Monad.Accum
 import Control.Monad.Action
 import Control.Monad.Regions
@@ -122,14 +123,14 @@ data ProbePosition a
 
 type Range a = (a, a)
 
-instance (Typeable a, Eq a) => StateMap ProbePosition a where
+instance (Typeable a, Show a, Eq a) => StateMap ProbePosition a where
     stateMap st = case st of
         ProbeIn v       -> Final v
         ProbeInLiquid v -> OtherComplete v
         ProbeSomewhere  -> Fail
         _               -> LocalDrivenIntermediate
 
-instance (Typeable a, Eq a) => StateMap Position a where
+instance (Typeable a, Show a, Eq a) => StateMap Position a where
     stateMap st = case st of
         In v      -> Final v
         Somewhere -> Fail
@@ -266,10 +267,11 @@ motorStatus = immediateParsec 'm' $ (\xM yM aM bM cM dM pM -> MotorDigest xM yM 
             <|> (char 'E' $> MotorError)
             <|> (char 'I' $> MotorNotInit)
 
-mkQZWithNormalBox (xRng, yRng, zRng) = mkQZ (xRng, yRng, fmap (const zRng) Probes {})
+mkQZWithNormalBox :: (MonadUnderA m, MonadAccum (CreateCtx d QuadZ s IO) m) => ((Deci, Deci), (Deci, Deci), (Deci, Deci)) -> Action QuadZ Create s m (QuadZ s)
+mkQZWithNormalBox (xRng, yRng, zRng) = mkQZ (xRng, yRng, Probes zRng zRng zRng zRng)
 
 mkQZ :: (MonadUnderA m, MonadAccum (CreateCtx d QuadZ s IO) m) => ((Deci, Deci), (Deci, Deci), Probes (Deci, Deci)) -> Action QuadZ Create s m (QuadZ s)
-mkQZ box@(xRng, yRng, zRng) = do
+mkQZ (xRng, yRng, zRng) = do
     let positionValidate v@(x, y)
             | x < fst xRng || x > snd xRng = Left ("X out of range " ++ show xRng)
             | y < fst yRng || y > snd yRng = Left ("Y out of range " ++ show yRng)
@@ -281,14 +283,18 @@ mkQZ box@(xRng, yRng, zRng) = do
             MkFixed dx <- withDevice $ readProperty . probeWidth
             buffered ("X" ++ show (x + 180 - dx) ++ "/" ++ show y))
         propertyOptional
-            { mkPropertyValidator'        = positionValidate
-            , mkPropertyEq'               = \(x0, y0) (x1, y1) -> abs (x0 - x1) + abs (y0 - y1) <= 0.2
+            { mkPropertyValidator        = positionValidate
+            , mkPropertyEq               = \(x0, y0) (x1, y1) -> abs (x0 - x1) + abs (y0 - y1) <= 0.2
+            , mkPropertyMutationPrecheck = \_ dev -> propertyTransitionCheck' probeWidth : (toList $ fmap (propertyTransitionCheck . zAxisPosition) $ probes dev)
             }
 
     widthProp <- newGsiocProperty "Probe distance"
         transPitchStatus
         (\_ (MkFixed val) -> buffered ('w' : show val))
-        propertyOptional { mkPropertyValidator' = rangeValidate 9 18 }
+        propertyOptional
+            { mkPropertyValidator = rangeValidate 9 18
+            , mkPropertyMutationPrecheck = \_ dev -> propertyTransitionCheck' xyAxisPosition : (toList $ fmap (propertyTransitionCheck . zAxisPosition) $ probes dev)
+            }
 
     let probeLetter = Probes 'a' 'b' 'c' 'd'
 
@@ -298,16 +304,8 @@ mkQZ box@(xRng, yRng, zRng) = do
                 (\_ -> probeStatus selector)
                 (\_ (MkFixed val) -> buffered ('Z' : selector probeLetter : show val))
                 propertyOptional
-                    { mkPropertyValidator' = rangeValidate (fst $ selector zRng) (snd $ selector zRng)
-                    , mkPropertyMutationPrecheck' = \_ act -> withDevice $ \quadz -> do
---                        probesEvs <- mapM (propertyCompleteEvent . zAxisPosition) $ probes quadz
---                        widthEv   <- propertyCompleteEvent $ probeWidth quadz
-                        propertyCompleteEvent (xyAxisPosition quadz) act
---                        return $ xyEv
---                            c1 <- all id <$> sequence probesEvs
---                            c2 <- widthEv
---                            c3 <- xyEv
---                            return $ c1 && c2 && c3
+                    { mkPropertyValidator = rangeValidate (fst $ selector zRng) (snd $ selector zRng)
+                    , mkPropertyMutationPrecheck = \_ dev -> propertyTransitionCheck' probeWidth : propertyTransitionCheck' xyAxisPosition : (toList $ fmap (propertyTransitionCheck . zAxisPosition) $ probes dev)
                     }
             return Probe { zAxisPosition = zPos }
 
