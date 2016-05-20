@@ -10,6 +10,7 @@ module Control.Monad.Regions
     , Scope
     , ioscope
     , scope
+    , scope'
     , rescope )
 where
 
@@ -51,7 +52,7 @@ region = unRegion
 class Monad m => InScope m r | m -> r where
     onExit :: r () -> m ()
 
-    default onExit :: (InScope m r, MonadTrans t) => r () -> t m ()
+    default onExit :: MonadTrans t => r () -> t m ()
     onExit = lift . onExit
 
 instance InScope m r => InScope (ReaderT e m) r
@@ -77,6 +78,13 @@ ioscope eval = bracket
     (liftIO $ newIORef $ return ())
     (join . liftIO . readIORef)
     (runReaderT (unScope eval))
+
+scope' :: (Monad m, MonadIO (t m), Injectable t) => t (Scope (t m) m) c -> t m c
+scope' eval = do
+    ref <- liftIO $ newIORef $ return ()
+    v <- injection_ (flip runReaderT ref . unScope) eval
+    join $ liftIO $ readIORef ref
+    return v
 
 scope :: (Monad m, MonadIO (t m), Injectable t, MonadMask (t m)) => t (Scope (t m) m) c -> t m c
 scope eval = bracket

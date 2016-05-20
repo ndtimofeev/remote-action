@@ -5,7 +5,7 @@ module Control.Monad.Accum
     , runMAccumT
     , runMAccumT'
     , Finalize
-    , evalFinalize
+--    , evalFinalize
     , MonadAccum(..) )
 where
 
@@ -23,9 +23,9 @@ import Control.Monad.Reader
 -- internal
 import Control.Monad.Injectable
 
-instance Monad m => Monoid (m ()) where
-    mempty  = return ()
-    mappend = (>>)
+--instance Monad m => Monoid (m ()) where
+--    mempty  = return ()
+--    mappend = (>>)
 
 -- | Restricted version 'WriterT'
 newtype AccumT w m a = AccumT { unAccumT :: WriterT w m a }
@@ -50,17 +50,17 @@ runMAccumT' ref eval = runReaderT (unMAccumT eval) ref
 type Finalize n m = MAccumT (n ()) m
 
 
-evalFinalize :: (MonadMask (t m), Monad (t m), Injectable t, MonadIO m) => t (Finalize (t m) m) a -> t m a
-evalFinalize eval =
-    bracket
-        (lift $ liftIO $ newIORef mempty)
-        (\ref -> join $ lift $ liftIO $ readIORef ref)
-        (\ref -> injection_ (\m -> runReaderT (unMAccumT m) ref) eval)
+-- evalFinalize :: (MonadMask (t m), Monad (t m), Injectable t, MonadIO m) => t (Finalize (t m) m) a -> t m a
+-- evalFinalize eval =
+--     bracket
+--         (lift $ liftIO $ newIORef mempty)
+--         (\ref -> join $ lift $ liftIO $ readIORef ref)
+--         (\ref -> injection_ (\m -> runReaderT (unMAccumT m) ref) eval)
 
 class Monad m => MonadAccum w m | m -> w where
     accum :: w -> m ()
 
-    default accum :: (MonadAccum w m, MonadTrans t) => w -> t m ()
+    default accum :: MonadTrans t => w -> t m ()
     accum = lift . accum
 
 instance (Monoid w, MonadReader r m) => MonadReader r (AccumT w m) where
