@@ -53,6 +53,7 @@ import Data.Typeable
 import Data.List
 
 import GHC.Exts
+import GHC.Stack
 
 import Unsafe.Coerce
 
@@ -74,6 +75,7 @@ import Control.Monad.Reader
 
 -- internal
 import Control.Monad.Accum
+import Control.Monad.Exception
 import Control.Monad.Injectable
 import Control.Monad.Regions
 
@@ -114,7 +116,7 @@ class DeviceHandle devHnd where
     toDynamicDevice :: devHnd dev -> DynamicDevice dev
 
 type MonadUnderA m = (MonadIO m, MonadMask m)
-type MonadAction dev m = (MonadUnderA m, MonadTrans (Protocol dev), MonadUnderA (Protocol dev IO), MonadUnderA (Protocol dev m))
+type MonadAction dev m = (MonadUnderA m, HasCallStack, MonadTrans (Protocol dev), MonadUnderA (Protocol dev IO), MonadUnderA (Protocol dev m))
 
 type HandleLock    = TVar (Maybe (Word, ThreadId))
 
@@ -235,8 +237,10 @@ deriving instance Functor (Protocol dev m)      => Functor (Action dev eff s m)
 deriving instance Applicative (Protocol dev m)  => Applicative (Action dev eff s m)
 deriving instance Monad (Protocol dev m)        => Monad (Action dev eff s m)
 deriving instance MonadIO (Protocol dev m)      => MonadIO (Action dev eff s m)
-deriving instance MonadThrow (Protocol dev m)   => MonadThrow (Action dev eff s m)
-deriving instance MonadCatch (Protocol dev m)   => MonadCatch (Action dev eff s m)
+deriving instance (MonadIO (Protocol dev m), MonadCatch (Protocol dev m)) => MonadCatch (Action dev eff s m)
+-- deriving instance MonadThrow (Protocol dev m)   => MonadThrow (Action dev eff s m)
+instance MonadIO (Protocol dev m)   => MonadThrow (Action dev eff s m) where
+    throwM = liftIO . throwM -- throwMWithStack
 
 instance (MonadTrans (Protocol dev), Monad (Protocol dev m), InScope m r) => InScope (Action dev eff s m) r
 instance (MonadTrans (Protocol dev), Monad (Protocol dev m), MonadAccum acc m) => MonadAccum acc (Action dev eff s m) where
@@ -245,7 +249,7 @@ instance (MonadTrans (Protocol dev), MonadReader r (Protocol dev m), MonadReader
     ask     = lift ask
     local f = Action . mapReaderT (local f) . unAction
 
-instance MonadMask (Protocol dev m) => MonadMask (Action dev eff s m) where
+instance (MonadIO (Protocol dev m), MonadMask (Protocol dev m)) => MonadMask (Action dev eff s m) where
     mask eval                = Action $ mask $ \u -> unAction (eval (Action . u . unAction))
     uninterruptibleMask eval = Action $ uninterruptibleMask $ \u -> unAction (eval (Action . u . unAction))
 

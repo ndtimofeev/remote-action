@@ -29,6 +29,7 @@ module Data.Property
     propertyMutator,
     propertyTransitionCheck,
     propertyTransitionCheck',
+    throwPropertyException,
     mkTransition,
     mkUnsafeTransition,
     mkUnsafeTransition2,
@@ -80,6 +81,8 @@ import Data.Function
 import Data.Functor.Identity
 import Data.Maybe
 import Data.Typeable
+
+import GHC.Stack
 
 -- async
 import Control.Concurrent.Async
@@ -246,7 +249,7 @@ newProperty propertyName' requestStatus' propertyAwait' propertyMutator' extraPa
             , propertyFailStateHandler  = mkPropertyFailStateHandler extraPart prop }
     return prop
 
-throwPropertyException :: (StateMap f a, Show (err f a), MonadIO m, MonadThrow m) => Property dev s f a -> err f a -> m b
+throwPropertyException :: (HasCallStack, StateMap f a, Show (err f a), MonadIO m, MonadThrow m) => Property dev s f a -> err f a -> m b
 throwPropertyException prop val = do
     propInfo <- liftIO $ atomically $ takePropertyInfo prop
     throwM $ PropertyException val propInfo
@@ -286,7 +289,7 @@ askStatus prop =
 
 commitState :: StateMap f a => Property dev s f a -> f a -> STM ()
 commitState prop st = void $ runMaybeT $
-    startingStateGuard <|> targetMissmatchCase <|> runningCase <|> lift otherCase <|> (let x:_ = [] in x) -- assert True undefined
+    startingStateGuard <|> targetMissmatchCase <|> runningCase <|> lift otherCase <|> error "Unacceptable"
     where
         -- If transition starting but not running skip all state equal old
         -- state.
@@ -342,14 +345,13 @@ commitState prop st = void $ runMaybeT $
             unless (isJust (completeState st) || failState st) $ do
                 var        <- newTVar $ Right Nothing
                 tchan      <- newBroadcastTChan
-                pinfo      <- takePropertyInfo prop
                 writeTVar (propertyTransId prop) $ Just TransitionId
                     { -- transitionKind          = Legacy
                     -- ,
                     transitionTo            = Nothing
                     , transitionValueStream   = tchan
                     , transitionStatus        = var
-                    , transitionFinalizer     = throw $ PropertyException (WrappedState st) pinfo -- let x : _ = [] in x -- assert True undefined
+                    , transitionFinalizer     = error "Unacceptable"
                     }
 
         cacheReason = localDrivenState st || failState st

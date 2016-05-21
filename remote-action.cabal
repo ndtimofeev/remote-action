@@ -23,11 +23,12 @@ flag debug
   default:     False
 
 library
-  ghc-options: -Wall -fno-warn-orphans -fno-warn-unused-do-bind -fprint-potential-instances
+--  ghc-options: -Wall -fprof-auto -fno-warn-orphans -fno-warn-unused-do-bind -fprint-potential-instances
   exposed-modules:
     Control.Concurrent.Utils,
     Control.Monad.Action,
     Control.Monad.Accum,
+    Control.Monad.Exception,
     Control.Monad.Injectable,
     Control.Monad.Regions,
     Data.Flist,
@@ -79,6 +80,7 @@ library
 Test-Suite test
   type:                detailed-0.9
   test-module:         Test
+--  ghc-options: -Wall -fprof-auto -fno-warn-orphans -fno-warn-unused-do-bind -fprint-potential-instances
   other-modules:
 --  exposed-modules:
     Test.Control.Monad.Action,
